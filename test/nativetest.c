@@ -142,6 +142,18 @@ static decoded mk_lz(int dst, int src, int opsize){
     return d;
 }
 
+/* MULX decoded: dlo<-VEX.vvvv (d.dst), dhi<-ModRM.reg (d.bmi_dst2), src<-ModRM.rm
+ * (d.b_src); s1 is implicit RDX (d.bmi_s1_rdx). Register operands only. */
+static decoded mk_mulx(int dlo, int dhi, int src, int opsize){
+    decoded d; memset(&d, 0, sizeof d);
+    d.op = BMI_MULX; d.is_bmi = 1; d.opsize = (uint8_t)opsize;
+    d.dst = (int8_t)dlo; d.dst_kind = DST_GPR; d.bmi_dst2 = (int8_t)dhi;
+    d.bmi_s1_rdx = 1; d.a_src = OPND_NONE; d.b_src = (int8_t)src; d.c_src = OPND_NONE;
+    d.base = OPND_NONE; d.index = OPND_NONE; d.scale = 1;
+    d.mem_bytes = (uint8_t)(opsize/8); d.len = 5;
+    return d;
+}
+
 /* Scalar-GPR differential driver: run the C BMI ground truth and the emitted
  * native scalar block on IDENTICAL regfiles (same gpr seed + rflags), then assert
  * every GPR slot and rflags match bit-for-bit, that the owned flag bits (CF/ZF/
@@ -310,6 +322,22 @@ int main(void){
     { gprset g[] = { {2,0x00000ff0u} };
       tramp_insn t[]={ TI(mk_lz(1,2,32)), TI(mk_lz(3,1,32)) };
       run_case_bmi("lzcnt ecx,edx ; lzcnt ebx,ecx (multi)", t,2,g,1,FIN); }
+
+    /* ---- MULX: reg-only; s1=rdx(reg2), s2=gpr[src]; low->dlo, high->dhi; NO flags.
+     * All owned flag bits (CF/ZF/SF/OF) + PF/AF in FIN must be PRESERVED unchanged. ---- */
+    /* opsize 64 */
+    { gprset g[]={ {2,0xFFFFFFFFFFFFFFFFull}, {5,0xFFFFFFFFFFFFFFFFull} }; tramp_insn t[]={TI(mk_mulx(1,3,5,64))}; run_case_bmi("mulx rcx,rbx,rbp rdx=-1 src=-1 (64)", t,1,g,2,FIN); }
+    { gprset g[]={ {2,0ull},                   {5,0xDEADBEEFCAFEBABEull} }; tramp_insn t[]={TI(mk_mulx(1,3,5,64))}; run_case_bmi("mulx rcx,rbx,rbp rdx=0        (64)", t,1,g,2,FIN); }
+    { gprset g[]={ {2,2ull},                   {5,0x8000000000000000ull} }; tramp_insn t[]={TI(mk_mulx(1,3,5,64))}; run_case_bmi("mulx rcx,rbx,rbp 2*2^63       (64)", t,1,g,2,FIN); }
+    { gprset g[]={ {2,0x0123456789abcdefull},  {5,0xfedcba9876543210ull} }; tramp_insn t[]={TI(mk_mulx(1,3,5,64))}; run_case_bmi("mulx rcx,rbx,rbp random       (64)", t,1,g,2,FIN); }
+    /* opsize 32: preseed dlo/dhi slots all-ones -> verify 32-bit zero-extension; rdx hi-garbage masked */
+    { gprset g[]={ {1,~0ull},{3,~0ull},{2,0xDEADBEEFFFFFFFFFull},{5,0x00000002u} }; tramp_insn t[]={TI(mk_mulx(1,3,5,32))}; run_case_bmi("mulx ecx,ebx,ebp rdx hi-garbage(32)", t,1,g,4,FIN); }
+    { gprset g[]={ {1,~0ull},{3,~0ull},{2,0xFFFFFFFFu},{5,0xFFFFFFFFu} };          tramp_insn t[]={TI(mk_mulx(1,3,5,32))}; run_case_bmi("mulx ecx,ebx,ebp -1*-1        (32)", t,1,g,4,FIN); }
+    /* aliasing: dhi==src (src loaded before dhi slot written); dlo==rdx-slot */
+    { gprset g[]={ {2,0x00000000FEDCBA98ull}, {5,0x0000000012345678ull} };        tramp_insn t[]={TI(mk_mulx(1,5,5,64))}; run_case_bmi("mulx rcx,rbp,rbp dhi==src     (64)", t,1,g,2,FIN); }
+    { gprset g[]={ {2,0x00000000ABCDEF01ull}, {6,0x0000000076543210ull} };        tramp_insn t[]={TI(mk_mulx(2,3,6,64))}; run_case_bmi("mulx rdx,rbx,rsi dlo==rdx     (64)", t,1,g,2,FIN); }
+    /* high regs (REX.B on the mul r/m and slots) */
+    { gprset g[]={ {2,0x00000000DEADBEEFull}, {11,0x00000000CAFEBABEull} };       tramp_insn t[]={TI(mk_mulx(10,12,11,64))}; run_case_bmi("mulx r10,r12,r11 (64,REX)",       t,1,g,2,FIN); }
 
     printf("\nNATIVETEST TOTAL: %d failure(s)\n", g_fail);
     return g_fail ? 1 : 0;

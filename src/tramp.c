@@ -650,12 +650,50 @@ static void gb_or   (uint8_t **p,int w,int d,int s){ gb_alu_rr(p,w,0x09,s,d); } 
 static void gb_sub  (uint8_t **p,int w,int d,int s){ gb_alu_rr(p,w,0x29,s,d); }  /* d -= s   */
 static void gb_test (uint8_t **p,int w,int a,int b){ gb_alu_rr(p,w,0x85,a,b); }  /* test a,b */
 static void gb_bsr  (uint8_t **p,int w,int d,int s){ gb_alu0f_rr(p,w,0xBD,d,s); }
+static void gb_bsf  (uint8_t **p,int w,int d,int s){ gb_alu0f_rr(p,w,0xBC,d,s); }
 static void gb_cmovz(uint8_t **p,int w,int d,int s){ gb_alu0f_rr(p,w,0x44,d,s); }
 /* setz r8l. Force a REX so r8..r15 (and r4..r7) select the proper low byte. */
 static void gb_setz (uint8_t **p,int r){ nb(p,(uint8_t)(0x40|((r>=8)?1:0))); nb(p,0x0F); nb(p,0x94); nb(p,(uint8_t)(0xC0|(r&7))); }
 static void gb_shl_imm(uint8_t **p,int w,int r,uint8_t i){ gb_rex(p,w,0,r); nb(p,0xC1); nb(p,(uint8_t)(0xC0|(4<<3)|(r&7))); nb(p,i); }
 static void gb_mov_imm32(uint8_t **p,int r,uint32_t imm){ if(r>=8) nb(p,0x41); nb(p,(uint8_t)(0xB8|(r&7))); nb32(p,imm); } /* zero-extends to 64 */
 static void gb_and_imm32(uint8_t **p,int w,int r,uint32_t imm){ gb_rex(p,w,0,r); nb(p,0x81); nb(p,(uint8_t)(0xC0|(4<<3)|(r&7))); nb32(p,imm); } /* sign-extends imm32 */
+/* ---- live-register helpers for the minimal-spill thunk (push/pop, flag image,
+ * jmp). All position-correct so long as the emit cursor is the FINAL location. */
+static void gb_push  (uint8_t **p,int r){ if(r>=8) nb(p,0x41); nb(p,(uint8_t)(0x50|(r&7))); }
+static void gb_pop   (uint8_t **p,int r){ if(r>=8) nb(p,0x41); nb(p,(uint8_t)(0x58|(r&7))); }
+static void gb_pushfq(uint8_t **p){ nb(p,0x9C); }
+static void gb_popfq (uint8_t **p){ nb(p,0x9D); }
+/* and qword [rsp], imm32  (48 81 /4, modrm 00/4/100 + SIB rsp) — sign-extends imm32 */
+static void gb_and_rsp_imm32(uint8_t **p,uint32_t imm){ nb(p,0x48); nb(p,0x81); nb(p,0x24); nb(p,0x24); nb32(p,imm); }
+/* or qword [rsp], reg  (REX.W[.R] 09 /r, modrm 00/reg/100 + SIB rsp) */
+static void gb_or_rsp_reg(uint8_t **p,int reg){ nb(p,(uint8_t)(0x48|((reg>=8)?4:0))); nb(p,0x09); nb(p,(uint8_t)(0x04|((reg&7)<<3))); nb(p,0x24); }
+/* jmp rel32 to absolute `target` from the current (final) emit point */
+static void gb_jmp_abs(uint8_t **p,uint64_t target){ nb(p,0xE9); int32_t rel=(int32_t)((int64_t)target-(int64_t)(*p+4)); nb32(p,rel); }
+/* lea rsp, [rsp+disp32]  (48 8D A4 24 disp32) — adjust rsp WITHOUT touching flags */
+static void gb_lea_rsp(uint8_t **p,int32_t disp){ nb(p,0x48); nb(p,0x8D); nb(p,0xA4); nb(p,0x24); nb32(p,(uint32_t)disp); }
+static void gb_mov   (uint8_t **p,int w,int d,int s){ gb_alu_rr(p,w,0x89,s,d); } /* d = s (mov r/m,r) */
+/* shl r, cl  (D3 /4) — count masked to 5 (w=0) / 6 (w=1) bits, matching shlx */
+static void gb_shl_cl(uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xD3); nb(p,(uint8_t)(0xC0|(4<<3)|(r&7))); }
+/* shr r, cl  (D3 /5) — logical right shift by CL, matching shrx */
+static void gb_shr_cl(uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xD3); nb(p,(uint8_t)(0xC0|(5<<3)|(r&7))); }
+/* sar r, cl  (D3 /7) — arithmetic right shift by CL, matching sarx */
+static void gb_sar_cl(uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xD3); nb(p,(uint8_t)(0xC0|(7<<3)|(r&7))); }
+/* ror r, imm8  (C1 /1 ib) — rotate right by immediate, matching rorx (base-ISA, no BMI2) */
+static void gb_ror_imm(uint8_t **p,int w,int r,uint8_t imm){ gb_rex(p,w,0,r); nb(p,0xC1); nb(p,(uint8_t)(0xC0|(1<<3)|(r&7))); nb(p,imm); }
+/* mul r  (F7 /4): (r)dx:(r)ax = (r)ax * r  (unsigned widening; clobbers rdx:rax + flags) */
+static void gb_mul_reg(uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xF7); nb(p,(uint8_t)(0xC0|(4<<3)|(r&7))); }
+/* and r/m, r  (21 /r) — d &= s, same encoding pattern as xor/or */
+static void gb_and(uint8_t **p,int w,int d,int s){ gb_alu_rr(p,w,0x21,s,d); }
+/* dec r  (FF /1) — r-- ; modifies flags (CF undefined; ZF/SF/OF/PF/AF defined) */
+static void gb_dec(uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xFF); nb(p,(uint8_t)(0xC8|(r&7))); }
+/* setnz r/m8  (0F 95 /0) — set byte if ZF==0 (not zero / not equal) */
+static void gb_setnz(uint8_t **p,int r){ nb(p,(uint8_t)(0x40|((r>=8)?1:0))); nb(p,0x0F); nb(p,0x95); nb(p,(uint8_t)(0xC0|(r&7))); }
+/* sets r/m8   (0F 98 /0) — set byte if SF==1 (sign flag set) */
+static void gb_sets (uint8_t **p,int r){ nb(p,(uint8_t)(0x40|((r>=8)?1:0))); nb(p,0x0F); nb(p,0x98); nb(p,(uint8_t)(0xC0|(r&7))); }
+/* neg r  (F7 /3) — r = 0 - r ; clobbers CF/ZF/SF/OF/PF/AF */
+static void gb_neg  (uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xF7); nb(p,(uint8_t)(0xD8|(r&7))); }
+/* not r  (F7 /2) — r = ~r ; does NOT touch flags (unlike NEG) */
+static void gb_not  (uint8_t **p,int w,int r){ gb_rex(p,w,0,r); nb(p,0xF7); nb(p,(uint8_t)(0xD0|(r&7))); }
 
 /* Emit one LZCNT into the scalar block. Mirrors reloc.c's LZCNT lowering for the
  * value+flag arithmetic, but reads src and writes dst/flags via the rf MEMORY
@@ -693,6 +731,57 @@ static int gb_emit_lzcnt(uint8_t **p, const decoded *d){
     return 1;
 }
 
+/* Emit one MULX into the scalar block. Semantics (bmi_exec BMI_MULX): s1=rf->gpr[rdx]
+ * (implicit), s2=rf->gpr[b_src]; low product -> dst slot, high -> dst2 slot; NO flags.
+ * Lowering uses base-ISA MUL ((r)dx:(r)ax = (r)ax * T2). Both sources are loaded into
+ * registers BEFORE any dst slot is written, so dst/src slot aliasing is safe. The
+ * rflags slot is left untouched (MULX affects no flags), even though MUL clobbers the
+ * live CPU flags — tt2 reloads rflags from the slot, so the live clobber is discarded.
+ * opsize 32: 32-bit MUL zero-extends eax/edx to the full 64-bit slot (matches
+ * (u32)p / (u32)(p>>32)); opsize 64: rdx:rax is the 128-bit product. */
+static int gb_emit_mulx(uint8_t **p, const decoded *d){
+    const int w = (d->opsize == 64);
+    gb_load(p, GB_S,  RF_GPR_OFF + 2 * 8, w);            /* rax = s1 = gpr[rdx] */
+    gb_load(p, GB_T2, RF_GPR_OFF + d->b_src * 8, w);     /* T2  = s2 = gpr[b_src] */
+    gb_mul_reg(p, w, GB_T2);                             /* rdx:rax = rax * T2 */
+    gb_store(p, GB_S,  RF_GPR_OFF + d->dst      * 8);    /* dst  = low  (rax) */
+    gb_store(p, GB_T1, RF_GPR_OFF + d->bmi_dst2 * 8);    /* dst2 = high (rdx == GB_T1) */
+    return 1;
+}
+
+/* native-BLOCK op support (LZCNT + MULX). SEPARATE from bmi_native_insn_supported
+ * below (which the minspill path shares, LZCNT/shlx-only) so broadening the block
+ * path here cannot change minspill selection. */
+static int bmi_block_op_supported(const decoded *d){
+    if (!d->is_bmi) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->b_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst < 0 || d->dst > 15) return 0;
+    switch (d->op){
+    case BMI_LZCNT:
+        if (d->a_src < 0 || d->a_src > 15) return 0;
+        if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+        return 1;
+    case BMI_MULX:
+        if (!d->bmi_s1_rdx) return 0;                       /* s1 must be implicit rdx */
+        if (d->bmi_dst2 < 0 || d->bmi_dst2 > 15) return 0;  /* high dest */
+        if (d->b_src   < 0 || d->b_src   > 15) return 0;    /* s2 = gpr[b_src] */
+        return 1;
+    default: return 0;
+    }
+}
+
+/* Dispatch one supported scalar-BMI op to its emitter. */
+static int gb_emit_bmi(uint8_t **p, const decoded *d){
+    switch (d->op){
+    case BMI_LZCNT: return gb_emit_lzcnt(p, d);
+    case BMI_MULX:  return gb_emit_mulx(p, d);
+    default: return 0;
+    }
+}
+
 /* Is this insn a scalar-GPR op the native scalar block supports? (LZCNT only for
  * now; register operands, no memory/segment, opsize 32/64.) */
 static int bmi_native_insn_supported(const decoded *d){
@@ -707,17 +796,908 @@ static int bmi_native_insn_supported(const decoded *d){
     return 1;
 }
 
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER lzcnt thunk (Phase 1a — the hypothesis gate).
+ *
+ * Unlike the tt2 path (spill all 16 GPR + flags to the regfile, run against
+ * slots, reload all), this emits a per-op thunk that runs lzcnt on the LIVE
+ * program registers in place, saving only the 2 scratch GPRs its lowering
+ * borrows + the original flags image. Entered by `jmp` from the patched site;
+ * ends with `jmp resume`.
+ *
+ * Reuses gb_emit_lzcnt's exact math (CF=(src==0) captured before bsr for dst==src
+ * safety; result = (src==0)?opsize:(opsize-1-bsr); ZF=(result==0); SF=OF=0; owned
+ * mask CLR=~(CF|ZF|SF|OF)), but: operands are live dst/src registers, and flags
+ * are the program's via pushfq/popfq. CRITICAL: pushfq runs BEFORE the arithmetic
+ * so the saved image holds the ORIGINAL PF/AF (the math clobbers them); we then
+ * patch only the owned bits in that saved image. (The plan sketched pushfq AFTER
+ * the math — that would write back arithmetic-clobbered PF/AF, breaking the
+ * "PF/AF unchanged" floor.)
+ * ========================================================================== */
+/* Like bmi_native_insn_supported, but ALSO declines rsp (4) as dst or src: the
+ * live-register thunk uses rsp as its working stack (push/pushfq), so an rsp
+ * operand would read/write the moved stack pointer. Such ops fall back to the
+ * slot-based path (which handles rsp correctly via the regfile). */
+static int minspill_lzcnt_supported(const decoded *d){
+    if (!bmi_native_insn_supported(d)) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;   /* rsp operand -> fall back */
+    return 1;
+}
+
+/* Emit the minimal-spill live-register lzcnt thunk at *p (the FINAL location, so
+ * the trailing jmp rel32 is correct). Returns 1, or 0 if d is unsupported. */
+static int emit_minspill_lzcnt(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_lzcnt_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t n = d->opsize;
+    const uint32_t CLR = 0xFFFFF73Eu;          /* ~(CF|ZF|SF|OF); sign-extends, preserves PF/AF */
+    const int D = d->dst, S = d->a_src;
+    /* Two scratch GPRs, deterministically the first two ids that are not dst, src,
+     * or rsp(4). 16 regs minus at most 3 exclusions => always available. */
+    int T1 = -1, T2 = -1;
+    for (int r = 0; r < 16 && T2 < 0; r++){
+        if (r == D || r == S || r == 4) continue;
+        if (T1 < 0) T1 = r; else T2 = r;
+    }
+    if (T1 < 0 || T2 < 0) return 0;
+
+    /* Step BELOW the interrupted function's 128-byte red zone before using the
+     * stack (push/pushfq), then restore — matching tramp.s's FRAME discipline.
+     * lea (not sub) so flags are untouched: pushfq below still sees ORIGINAL flags. */
+    gb_lea_rsp(p, -128);
+    gb_push(p, T1);
+    gb_push(p, T2);
+    gb_pushfq(p);                 /* [rsp] = ORIGINAL program flags (PF/AF source) */
+
+    /* CF = (src==0), captured BEFORE bsr (src read first => dst==src safe) */
+    gb_xor (p, 1, T1, T1);        /* T1 = 0 */
+    gb_test(p, w, S, S);          /* ZF = (src==0) */
+    gb_setz(p, T1);               /* T1 = (src==0) */
+    /* result into D */
+    gb_bsr (p, w, D, S);          /* D = bsr(src) (undef if src==0; w=0 zero-extends D) */
+    gb_mov_imm32(p, T2, n - 1);   /* T2 = opsize-1 */
+    gb_sub (p, 1, T2, D);         /* T2 = (opsize-1) - bsr */
+    gb_test(p, 1, T1, T1);        /* ZF = (T1==0) = (src!=0) */
+    gb_mov_imm32(p, D, n);        /* D = opsize (zero-input result; mov: no flag effect) */
+    gb_cmovz(p, 1, D, T2);        /* src!=0 -> D = T2 */
+    /* owned = CF (T1 bit0) | ZF(result==0)<<6 ; SF=OF=0 -> value in T1 */
+    gb_xor (p, 1, T2, T2);
+    gb_test(p, w, D, D);
+    gb_setz(p, T2);
+    gb_shl_imm(p, 1, T2, 6);
+    gb_or  (p, 1, T1, T2);        /* T1 = owned value */
+    /* patch saved flags image: clear owned, OR computed; PF/AF + rest preserved */
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T1);
+    gb_popfq(p);                  /* live flags = patched original */
+    gb_pop (p, T2);
+    gb_pop (p, T1);
+    gb_lea_rsp(p, 128);           /* restore rsp above the red zone (flags untouched) */
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER shlx thunk (re-aimed Phase-1a gate op).
+ *
+ * shlx dst, value, count : dst = value << (count & (opsize-1)); NO flags affected.
+ * (decode: dst=reg, a_src=value[r/m], b_src=count[reg].) The base-ISA shift
+ * `shl r,cl` needs the count in CL and DOES write flags, so the thunk: steps past
+ * the red zone, saves ALL flags (pushfq) + rcx + one scratch T, computes
+ * value<<count into T via cl, writes dst, restores T/rcx/flags. Declines rsp
+ * operands (we move rsp), a memory value (falls back), and dst==rcx (we restore
+ * rcx, which would clobber the result).
+ * ========================================================================== */
+static int minspill_shlx_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_SHLX) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;   /* reg value only */
+    if (d->dst < 0 || d->dst > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;                    /* value reg */
+    if (d->b_src < 0 || d->b_src > 15) return 0;                    /* count reg */
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4 || d->b_src == 4) return 0;    /* rsp operand -> fall back */
+    if (d->dst == 1) return 0;                                      /* dst==rcx -> fall back (rcx is our CL scratch) */
+    return 1;
+}
+
+/* Emit the minimal-spill live-register shlx thunk at *p (the FINAL location). */
+static int emit_minspill_shlx(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_shlx_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const int D = d->dst, V = d->a_src, C = d->b_src;
+    const int RCX = 1;
+    /* one scratch T, not dst/value/count/rcx/rsp */
+    int T = -1;
+    for (int r = 0; r < 16; r++){ if (r==D||r==V||r==C||r==RCX||r==4) continue; T = r; break; }
+    if (T < 0) return 0;
+
+    gb_lea_rsp(p, -128);          /* step below the red zone (no flag effect) */
+    gb_pushfq(p);                 /* save ALL flags (shl clobbers; shlx preserves) */
+    gb_push(p, RCX);              /* save program rcx (we need CL) */
+    gb_push(p, T);                /* save scratch T */
+    gb_mov(p, w, T, V);           /* T = value (read V before rcx is clobbered) */
+    gb_mov(p, 1, RCX, C);         /* rcx = count (64-bit; shl uses CL, masks to size-1) */
+    gb_shl_cl(p, w, T);           /* T = value << (count & mask) */
+    gb_mov(p, 1, D, T);           /* dst = result (D != rcx, so the pop below won't clobber;
+                                     w=0 left T zero-extended, so 64-bit mov is correct) */
+    gb_pop(p, T);
+    gb_pop(p, RCX);               /* restore program rcx */
+    gb_popfq(p);                  /* restore flags unchanged (shlx defines none) */
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER tzcnt thunk.
+ *
+ * TZCNT is the BSF mirror of LZCNT: result = (src==0) ? opsize : bsf(src).
+ * Flags: CF=(src==0); ZF=(result==0); SF=0; OF=0; PF/AF preserved.
+ * Base-ISA lowering: BSF (0F BC) gives the trailing-zero count for src!=0;
+ * src==0 is special-cased to opsize with CF=1, using the same
+ * test+setz+cmovz pattern as emit_minspill_lzcnt.
+ *
+ * CRITICAL dst==src safety: BSF reads src into scratch T2 (NOT D) before D
+ * is overwritten with the opsize default, so the original src is preserved
+ * even when dst and src are the same register.
+ *
+ * pushfq runs BEFORE the arithmetic (same reason as lzcnt: arithmetic
+ * clobbers PF/AF, so the saved image must hold the original PF/AF).
+ * ========================================================================== */
+static int minspill_tzcnt_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_TZCNT) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->b_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst < 0 || d->dst > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;   /* rsp operand -> fall back */
+    return 1;
+}
+
+/* Emit the minimal-spill live-register tzcnt thunk at *p (the FINAL location). */
+static int emit_minspill_tzcnt(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_tzcnt_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t n = d->opsize;
+    const uint32_t CLR = 0xFFFFF73Eu;          /* ~(CF|ZF|SF|OF); sign-extends, preserves PF/AF */
+    const int D = d->dst, S = d->a_src;
+    /* Two scratch GPRs, deterministically the first two ids not dst, src, or rsp(4). */
+    int T1 = -1, T2 = -1;
+    for (int r = 0; r < 16 && T2 < 0; r++){
+        if (r == D || r == S || r == 4) continue;
+        if (T1 < 0) T1 = r; else T2 = r;
+    }
+    if (T1 < 0 || T2 < 0) return 0;
+
+    gb_lea_rsp(p, -128);           /* step below red zone (no flag effect) */
+    gb_push(p, T1);
+    gb_push(p, T2);
+    gb_pushfq(p);                  /* [rsp] = ORIGINAL program flags (PF/AF source) */
+
+    /* CF = (src==0), captured BEFORE bsf (src read first => dst==src safe) */
+    gb_xor (p, 1, T1, T1);        /* T1 = 0 */
+    gb_test(p, w, S, S);           /* ZF = (src==0) */
+    gb_setz(p, T1);                /* T1 = (src==0) -> CF */
+    /* BSF into T2 (not D), so dst==src is safe: D not touched yet */
+    gb_bsf (p, w, T2, S);         /* T2 = bsf(src) = tzcnt for src!=0 (undef if src==0) */
+    gb_mov_imm32(p, D, n);        /* D = opsize (zero-input result; mov: no flag effect) */
+    gb_test(p, 1, T1, T1);        /* ZF = (T1==0) = (src!=0) */
+    gb_cmovz(p, 1, D, T2);        /* src!=0 -> D = T2 = bsf result */
+    /* ZF = (result==0) -> bit6; SF=0, OF=0 */
+    gb_xor (p, 1, T2, T2);
+    gb_test(p, w, D, D);
+    gb_setz(p, T2);
+    gb_shl_imm(p, 1, T2, 6);
+    gb_or  (p, 1, T1, T2);        /* T1 = CF | ZF (owned value) */
+    /* patch saved flags image: clear owned bits, OR in computed, preserve PF/AF/rest */
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T1);
+    gb_popfq(p);                   /* live flags = patched original */
+    gb_pop (p, T2);
+    gb_pop (p, T1);
+    gb_lea_rsp(p, 128);            /* restore rsp above the red zone (flags untouched) */
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER shrx thunk.
+ *
+ * shrx dst, value, count : dst = value >> (count & (opsize-1)); NO flags.
+ * Logical right shift: upper bits of result are zero (unlike sarx).
+ * Mirrors emit_minspill_shlx exactly but uses SHR (D3 /5) instead of SHL.
+ * Same scratch/aliasing discipline: value read into T before rcx is clobbered
+ * by the count, so dst==value and dst==count aliasing are both safe.
+ * ========================================================================== */
+static int minspill_shrx_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_SHRX) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst < 0 || d->dst > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->b_src < 0 || d->b_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4 || d->b_src == 4) return 0;   /* rsp operand -> fall back */
+    if (d->dst == 1) return 0;                                      /* dst==rcx -> fall back (rcx is our CL scratch) */
+    return 1;
+}
+
+static int emit_minspill_shrx(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_shrx_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const int D = d->dst, V = d->a_src, C = d->b_src;
+    const int RCX = 1;
+    /* one scratch T, not dst/value/count/rcx/rsp */
+    int T = -1;
+    for (int r = 0; r < 16; r++){ if (r==D||r==V||r==C||r==RCX||r==4) continue; T = r; break; }
+    if (T < 0) return 0;
+
+    gb_lea_rsp(p, -128);          /* step below the red zone (no flag effect) */
+    gb_pushfq(p);                 /* save ALL flags (shr clobbers; shrx preserves) */
+    gb_push(p, RCX);              /* save program rcx (we need CL) */
+    gb_push(p, T);                /* save scratch T */
+    gb_mov(p, w, T, V);           /* T = value (read V before rcx is clobbered) */
+    gb_mov(p, 1, RCX, C);         /* rcx = count (64-bit; shr uses CL, masks to size-1) */
+    gb_shr_cl(p, w, T);           /* T = value >> (count & mask) */
+    gb_mov(p, 1, D, T);           /* dst = result (D != rcx; pop below won't clobber) */
+    gb_pop(p, T);
+    gb_pop(p, RCX);               /* restore program rcx */
+    gb_popfq(p);                  /* restore flags unchanged (shrx defines none) */
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER sarx thunk.
+ *
+ * sarx dst, value, count : dst = value sar (count & (opsize-1)); NO flags.
+ * Arithmetic right shift: the sign bit is replicated (unlike shrx which fills
+ * with zeros). Mirrors emit_minspill_shrx exactly but uses SAR (D3 /7).
+ * For opsize=32 the base-ISA SAR r32,CL sign-extends within 32 bits and the
+ * result is zero-extended to 64 (via the 32-bit register write), matching
+ * bmi_exec: (uint64_t)(uint32_t)((int32_t)(uint32_t)s1 >> n).
+ * ========================================================================== */
+static int minspill_sarx_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_SARX) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst < 0 || d->dst > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->b_src < 0 || d->b_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4 || d->b_src == 4) return 0;   /* rsp operand -> fall back */
+    if (d->dst == 1) return 0;                                      /* dst==rcx -> fall back */
+    return 1;
+}
+
+static int emit_minspill_sarx(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_sarx_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const int D = d->dst, V = d->a_src, C = d->b_src;
+    const int RCX = 1;
+    int T = -1;
+    for (int r = 0; r < 16; r++){ if (r==D||r==V||r==C||r==RCX||r==4) continue; T = r; break; }
+    if (T < 0) return 0;
+
+    gb_lea_rsp(p, -128);
+    gb_pushfq(p);                 /* save ALL flags (sar clobbers; sarx preserves) */
+    gb_push(p, RCX);
+    gb_push(p, T);
+    gb_mov(p, w, T, V);           /* T = value (read before rcx clobbered) */
+    gb_mov(p, 1, RCX, C);         /* rcx = count */
+    gb_sar_cl(p, w, T);           /* T = value sar (count & mask) */
+    gb_mov(p, 1, D, T);           /* dst = result */
+    gb_pop(p, T);
+    gb_pop(p, RCX);
+    gb_popfq(p);
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER rorx thunk.
+ *
+ * rorx dst, value, imm : dst = ror(value, imm & (opsize-1)); NO flags.
+ * The count is an IMMEDIATE baked into the instruction (d->imm), not a
+ * register — so no CL/rcx needed at all. Simpler than shrx/sarx: only one
+ * scratch T (for the value copy, so dst==value aliasing is safe). pushfq/
+ * popfq preserve the program flags that the base-ISA ROR would otherwise
+ * clobber. No dst==rcx decline (rcx is never borrowed). Declines rsp.
+ *
+ * The immediate is masked to opsize-1 bits before encoding, matching bmi_exec.
+ * ROR r, 0 (after masking) is a well-defined no-op on x86: flags are not
+ * affected and the destination is unchanged.
+ * ========================================================================== */
+static int minspill_rorx_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_RORX) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst < 0 || d->dst > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;   /* rsp operand -> fall back */
+    /* No dst==rcx constraint: rorx count is an immediate, CL not needed */
+    return 1;
+}
+
+static int emit_minspill_rorx(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_rorx_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const int D = d->dst, V = d->a_src;
+    /* mask to opsize-1 bits, matching bmi_exec: n = d->imm & (opsize-1) */
+    const uint8_t n = (uint8_t)((uint32_t)d->imm & (uint32_t)(d->opsize - 1));
+    /* one scratch T: not dst/value/rsp (no rcx constraint — not borrowing CL) */
+    int T = -1;
+    for (int r = 0; r < 16; r++){ if (r==D||r==V||r==4) continue; T = r; break; }
+    if (T < 0) return 0;
+
+    gb_lea_rsp(p, -128);
+    gb_pushfq(p);                 /* save ALL flags (ror clobbers; rorx preserves) */
+    gb_push(p, T);                /* save scratch T */
+    gb_mov(p, w, T, V);           /* T = value (dst==value aliasing: read before write) */
+    gb_ror_imm(p, w, T, n);       /* T = ror(value, n) using base-ISA C1 /1 ib (NOT rorx) */
+    gb_mov(p, 1, D, T);           /* dst = result */
+    gb_pop(p, T);                 /* restore scratch T */
+    gb_popfq(p);                  /* restore flags unchanged (rorx defines none) */
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER bzhi thunk.
+ *
+ * BZHI dst, value(a_src/rm), index(b_src/vvvv):
+ *   n = index & 0xFF
+ *   result = (n >= opsize) ? value : value & ((1<<n) - 1)
+ *   CF = (n > opsize-1);  ZF = (result==0);  SF = bit(opsize-1) of result;  OF = 0
+ * Flags: CF and SF are REAL (not forced to 0). PF/AF preserved.
+ *
+ * Lowering (base ISA only — no BZHI, no BMI):
+ *   - Save T1, T2, T3, rcx on stack; pushfq BEFORE math (preserve PF/AF).
+ *   - Read both sources into T1/T2 BEFORE writing dst (aliasing-safe for dst==value,
+ *     dst==index, value==index).
+ *   - CF via overflow bits of n (n & 0xE0 for opsize=32, n & 0xC0 for opsize=64).
+ *   - Mask via (1<<n)-1 using shl/dec; cmovz selects between masked and original
+ *     value (the n>=opsize candidate), making the wrapping shl result irrelevant.
+ *   - ZF and SF captured via test dst,dst + setz/sets BEFORE any flag-clobbering op.
+ *   - Patch the saved flags image (CLR = ~(CF|ZF|SF|OF) = 0xFFFFF73E).
+ *
+ * Declines: rsp(4) as any operand (we move rsp); dst==rcx(1) (pop rcx after write
+ * clobbers the result).
+ * ========================================================================== */
+static int minspill_bzhi_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_BZHI) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->b_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst  < 0 || d->dst  > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->b_src < 0 || d->b_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4 || d->b_src == 4) return 0;  /* rsp -> fall back */
+    if (d->dst == 1) return 0;   /* dst==rcx: pop(rcx) after result write clobbers it */
+    return 1;
+}
+
+static int emit_minspill_bzhi(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_bzhi_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t CLR = 0xFFFFF73Eu;   /* ~(CF|ZF|SF|OF); sign-extends, preserves PF/AF */
+    const int D = d->dst, V = d->a_src, IX = d->b_src;
+    const int RCX = 1;   /* always borrowed for the variable shift (shl_cl uses CL) */
+    /* Three scratch GPRs: first three ids not in {D, V, IX, RCX=1, rsp=4}. At least
+     * 10 candidates remain after at most 5 distinct exclusions — always possible. */
+    int T1 = -1, T2 = -1, T3 = -1;
+    for (int r = 0; r < 16 && T3 < 0; r++){
+        if (r == D || r == V || r == IX || r == RCX || r == 4) continue;
+        if (T1 < 0) T1 = r; else if (T2 < 0) T2 = r; else T3 = r;
+    }
+    if (T1 < 0 || T2 < 0 || T3 < 0) return 0;
+
+    /* Overflow mask: bits of n that indicate n >= opsize.
+     * opsize=32: n >= 32 iff n & 0xE0 != 0 (bits 5,6,7; n in [0,255]).
+     * opsize=64: n >= 64 iff n & 0xC0 != 0 (bits 6,7). */
+    const uint32_t ovf = (d->opsize == 32) ? 0xE0u : 0xC0u;
+
+    /* Step below the red zone before using the stack (lea: no flag effect).
+     * pushfq BEFORE arithmetic so the saved image holds ORIGINAL PF/AF. */
+    gb_lea_rsp(p, -128);
+    gb_push(p, T1); gb_push(p, T2); gb_push(p, T3); gb_push(p, RCX);
+    gb_pushfq(p);          /* [rsp] = ORIGINAL program flags */
+
+    /* Read both sources into scratch BEFORE any write to D (dst==value, dst==index safe). */
+    gb_mov(p, 1, T1, IX);              /* T1 = raw index (full 64-bit) */
+    gb_and_imm32(p, 0, T1, 0xFF);     /* T1 = n = index & 0xFF (zero-extended to 64) */
+    gb_mov(p, w, T2, V);              /* T2 = value (masked to opsize by 32/64-bit move) */
+
+    /* Copy n into T3 (for overflow test) and RCX (for shift). T1 preserved as n. */
+    gb_mov(p, 1, T3, T1);             /* T3 = n */
+    gb_mov(p, 1, RCX, T1);            /* RCX = n (CL will hold n for shl_cl) */
+
+    /* CF = (n >= opsize): AND overflow bits of n into T3, normalize to 0/1 via setnz. */
+    gb_and_imm32(p, 0, T3, ovf);      /* T3 = n & ovf (0 if n < opsize, nonzero if n >= opsize) */
+    gb_test(p, 1, T3, T3);            /* ZF = (T3==0) = (n < opsize) */
+    gb_setnz(p, T3);                   /* T3 = CF bit (1 if n >= opsize, 0 if n < opsize) */
+
+    /* Build mask: T1 = (1 << n) - 1.  For n >= opsize the shl wraps (base-ISA masks
+     * count to opsize-1 bits), yielding a garbage mask — cmov below discards it. */
+    gb_mov_imm32(p, T1, 1);           /* T1 = 1 (zero-extended to 64) */
+    gb_shl_cl(p, w, T1);              /* T1 = 1 << (n & (opsize-1)) */
+    gb_dec(p, w, T1);                  /* T1 = (1<<n) - 1 [mask for n < opsize] */
+
+    /* T2 = value & mask (CF=0 candidate result). */
+    gb_and(p, w, T2, T1);             /* T2 = value & mask */
+
+    /* Initialize D = value (CF=1 candidate: value unchanged for n >= opsize).
+     * If D==V this is mov D,D (a no-op); if D==IX the original index was already saved
+     * to T1 above and V still holds value untouched. */
+    gb_mov(p, w, D, V);               /* D = value */
+
+    /* Select result: if n < opsize (ZF=1 from test T3,T3): D = T2 (masked);
+     * if n >= opsize (ZF=0): D stays = value. cmovz uses the ZF from the test below. */
+    gb_test(p, 1, T3, T3);            /* ZF = (T3==0) = CF==0 = n < opsize */
+    gb_cmovz(p, w, D, T2);            /* n < opsize: D = masked result */
+
+    /* Compute owned flag bits from the final result in D.
+     * test D,D sets ZF=(D==0) and SF=sign-bit-of-D simultaneously.
+     * setz/sets read those bits WITHOUT modifying rflags; shifts after are fine. */
+    gb_test(p, w, D, D);              /* ZF=(result==0), SF=bit(opsize-1) of result */
+    gb_setz(p, T1);                    /* T1 = ZF (result==0) */
+    gb_sets(p, T2);                    /* T2 = SF (sign bit of result) */
+    gb_shl_imm(p, 1, T1, 6);         /* T1 = ZF<<6  (bit position of ZF in rflags) */
+    gb_shl_imm(p, 1, T2, 7);         /* T2 = SF<<7  (bit position of SF in rflags) */
+    gb_or(p, 1, T3, T1);             /* T3 |= ZF<<6 */
+    gb_or(p, 1, T3, T2);             /* T3 |= SF<<7 */
+    /* T3 = CF | (ZF<<6) | (SF<<7) ; OF=0 (BZHI always clears OF) */
+
+    /* Patch saved flags image: clear owned bits; OR in computed; preserve PF/AF/rest. */
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T3);
+    gb_popfq(p);                      /* live flags = patched original */
+    gb_pop(p, RCX);                   /* restore program rcx */
+    gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
+    gb_lea_rsp(p, 128);               /* restore rsp above the red zone (flags untouched) */
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER BLSR/BLSI/BLSMSK thunks.
+ *
+ * These are single-source BMI1 ops (one input GPR, one output GPR):
+ *   BLSR  dst, src: result = src & (src - 1)   CF=(src==0)
+ *   BLSI  dst, src: result = src & (0 - src)   CF=(src!=0)
+ *   BLSMSK dst, src: result = src ^ (src - 1)  CF=(src==0)
+ * All three: ZF=(result==0); SF=sign bit of result; OF=0; PF/AF preserved.
+ *
+ * decode layout: d->dst = VEX.vvvv (destination); d->a_src = ModRM.rm (source);
+ * d->b_src = OPND_NONE (no second source); d->bmi_s1_rdx = 0; d->bmi_dst2 = OPND_NONE.
+ *
+ * Lowering (base ISA only — no blsr/blsi/blsmsk):
+ *   - pushfq BEFORE math (preserve PF/AF in saved image).
+ *   - Read src into T2 BEFORE any write to dst (dst==src aliasing safe).
+ *   - Capture CF condition (test src,src + setz/setnz into T1) BEFORE arithmetic.
+ *   - Compute result into T2: BLSR: dec+and; BLSI: neg+and; BLSMSK: dec+xor.
+ *   - mov dst, T2  (result; opsize=32 zero-extends to 64 via 32-bit mov).
+ *   - Capture ZF and SF from result: test dst,dst; setz T2; sets T3; shift+or.
+ *   - Patch saved flags (CLR = ~(CF|ZF|SF|OF) = 0xFFFFF73E), popfq.
+ *
+ * No rcx/dst==rcx constraint: these ops never need CL (no variable shift).
+ * Decline only rsp(4) as dst or src (we move rsp for the stack frame).
+ * Three scratch GPRs needed: T1=CF accumulator, T2=computation scratch/ZF,
+ * T3=SF byte. Picked as first three not in {D, S, rsp=4}.
+ * ========================================================================== */
+static int minspill_blsr_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_BLSR) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst  < 0 || d->dst  > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;   /* rsp operand -> fall back */
+    return 1;
+}
+
+/* Shared scratch selector for single-source ops: picks first three ids not in
+ * {D, S, rsp=4}.  With at most 3 distinct exclusions, 13+ candidates remain. */
+static int pick3(int D, int S, int *T1, int *T2, int *T3){
+    *T1 = *T2 = *T3 = -1;
+    for (int r = 0; r < 16 && *T3 < 0; r++){
+        if (r == D || r == S || r == 4) continue;
+        if (*T1 < 0) *T1 = r; else if (*T2 < 0) *T2 = r; else *T3 = r;
+    }
+    return (*T1 >= 0 && *T2 >= 0 && *T3 >= 0);
+}
+
+/* Emit the owned CF|ZF|SF bits into T1 after the result is in D:
+ *   T1 already holds CF bit (set before math).
+ *   test D,D  -> setz T2 (ZF) + sets T3 (SF); shift+or into T1.
+ *   T1 = CF | (ZF<<6) | (SF<<7) ; OF=0 (always 0 for BLSR/BLSI/BLSMSK). */
+static void emit_zfsf_bits(uint8_t **p, int w, int D, int T1, int T2, int T3){
+    gb_test(p, w, D, D);         /* ZF=(D==0), SF=bit(opsize-1) of D; CF=OF=0 */
+    gb_setz(p, T2);               /* T2 = ZF bit (0 or 1)  [setz doesn't touch flags] */
+    gb_sets(p, T3);               /* T3 = SF bit (0 or 1)  [sets  doesn't touch flags] */
+    gb_shl_imm(p, 1, T2, 6);    /* T2 = ZF<<6  (bit-6 position in rflags) */
+    gb_shl_imm(p, 1, T3, 7);    /* T3 = SF<<7  (bit-7 position in rflags) */
+    gb_or(p, 1, T1, T2);         /* T1 |= ZF<<6 */
+    gb_or(p, 1, T1, T3);         /* T1 |= SF<<7 */
+    /* T1 = CF | (ZF<<6) | (SF<<7) ; OF bit not set (BLSR/BLSI/BLSMSK always clear OF) */
+}
+
+static int emit_minspill_blsr(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_blsr_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t CLR = 0xFFFFF73Eu;   /* ~(CF|ZF|SF|OF); sign-extends, preserves PF/AF */
+    const int D = d->dst, S = d->a_src;
+    int T1, T2, T3;
+    if (!pick3(D, S, &T1, &T2, &T3)) return 0;
+
+    gb_lea_rsp(p, -128);                    /* step past red zone; no flag effect */
+    gb_push(p, T1); gb_push(p, T2); gb_push(p, T3);
+    gb_pushfq(p);                           /* [rsp] = ORIGINAL program flags (PF/AF source) */
+
+    /* CF = (S == 0): capture BEFORE any arithmetic that clobbers flags */
+    gb_xor(p, 1, T1, T1);                  /* T1 = 0 */
+    gb_test(p, w, S, S);                    /* ZF = (S==0) [S not yet clobbered] */
+    gb_setz(p, T1);                          /* T1 = CF_blsr = (S==0) */
+
+    /* Compute result: T2 = S; T2 = (T2-1) & S  [reads original S; D not yet written] */
+    gb_mov(p, w, T2, S);                    /* T2 = S (dst==src aliasing: src read first) */
+    gb_dec(p, w, T2);                        /* T2 = S - 1 */
+    gb_and(p, w, T2, S);                    /* T2 = (S-1) & S */
+
+    /* Write result to D (may alias S; T2 has the result so S is no longer needed) */
+    gb_mov(p, w, D, T2);                    /* D = result; opsize32 zero-extends to 64 */
+
+    emit_zfsf_bits(p, w, D, T1, T2, T3);   /* T1 = CF|(ZF<<6)|(SF<<7) */
+
+    gb_and_rsp_imm32(p, CLR);              /* clear CF|ZF|SF|OF in saved flags */
+    gb_or_rsp_reg(p, T1);                  /* OR in computed owned bits */
+    gb_popfq(p);                            /* live flags = patched original */
+    gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
+    gb_lea_rsp(p, 128);                     /* restore rsp above red zone; no flag effect */
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+static int minspill_blsi_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_BLSI) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst  < 0 || d->dst  > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;
+    return 1;
+}
+
+static int emit_minspill_blsi(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_blsi_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t CLR = 0xFFFFF73Eu;
+    const int D = d->dst, S = d->a_src;
+    int T1, T2, T3;
+    if (!pick3(D, S, &T1, &T2, &T3)) return 0;
+
+    gb_lea_rsp(p, -128);
+    gb_push(p, T1); gb_push(p, T2); gb_push(p, T3);
+    gb_pushfq(p);
+
+    /* CF = (S != 0): BLSI sets CF when source is non-zero */
+    gb_xor(p, 1, T1, T1);                  /* T1 = 0 */
+    gb_test(p, w, S, S);                    /* ZF = (S==0) */
+    gb_setnz(p, T1);                         /* T1 = CF_blsi = (S!=0) */
+
+    /* Compute result: T2 = S; neg T2; and T2, S */
+    gb_mov(p, w, T2, S);                    /* T2 = S (aliasing safety: read before write to D) */
+    gb_neg(p, w, T2);                        /* T2 = 0 - T2 = -S */
+    gb_and(p, w, T2, S);                    /* T2 = (-S) & S (reads original S; D not yet written) */
+
+    gb_mov(p, w, D, T2);                    /* D = result */
+
+    emit_zfsf_bits(p, w, D, T1, T2, T3);
+
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T1);
+    gb_popfq(p);
+    gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+static int minspill_blsmsk_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_BLSMSK) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst  < 0 || d->dst  > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4) return 0;
+    return 1;
+}
+
+static int emit_minspill_blsmsk(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_blsmsk_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t CLR = 0xFFFFF73Eu;
+    const int D = d->dst, S = d->a_src;
+    int T1, T2, T3;
+    if (!pick3(D, S, &T1, &T2, &T3)) return 0;
+
+    gb_lea_rsp(p, -128);
+    gb_push(p, T1); gb_push(p, T2); gb_push(p, T3);
+    gb_pushfq(p);
+
+    /* CF = (S == 0): BLSMSK sets CF when source is zero (same as BLSR) */
+    gb_xor(p, 1, T1, T1);                  /* T1 = 0 */
+    gb_test(p, w, S, S);                    /* ZF = (S==0) */
+    gb_setz(p, T1);                          /* T1 = CF_blsmsk = (S==0) */
+
+    /* Compute result: T2 = S; dec T2; xor T2, S */
+    gb_mov(p, w, T2, S);                    /* T2 = S (aliasing safety) */
+    gb_dec(p, w, T2);                        /* T2 = S - 1 */
+    gb_xor(p, w, T2, S);                    /* T2 = (S-1) ^ S (reads original S; D not yet written) */
+
+    gb_mov(p, w, D, T2);                    /* D = result */
+
+    emit_zfsf_bits(p, w, D, T1, T2, T3);
+
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T1);
+    gb_popfq(p);
+    gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER ANDN thunk.
+ *
+ * ANDN dst, src1, src2:  dst = (~src1) & src2
+ *   CF=0; ZF=(result==0); SF=sign bit of result; OF=0; PF/AF preserved.
+ *
+ * decode layout: d->a_src=src1(VEX.vvvv), d->b_src=src2(ModRM.rm), d->dst=reg.
+ * This is a TWO-source op (unlike BLSR/BLSI/BLSMSK which are single-source).
+ * bmi_exec: s1=rf->gpr[a_src], s2=rf->gpr[b_src]; result = maskz(~s1 & s2, opsize).
+ *
+ * Lowering (base ISA only — no ANDN, no BMI1):
+ *   - pushfq BEFORE math (preserve PF/AF in saved image; NOT does not affect flags
+ *     at all, but AND and XOR do clobber PF/AF, so we save early).
+ *   - Read src1 into T1 BEFORE writing dst (dst==src1 and dst==src2 aliasing safe).
+ *   - NOT T1 → T1 = ~src1  (NOT does NOT touch flags — safe before pushfq's image).
+ *   - AND T1, src2(live) → T1 = (~src1) & src2  (src2 read before D written).
+ *   - MOV D, T1  → dst = result (32-bit zero-extends to 64).
+ *   - T1 = 0  (CF=0 for ANDN; this clobbers live flags but emit_zfsf_bits re-sets them).
+ *   - emit_zfsf_bits: test D,D + setz T2 (ZF) + sets T3 (SF) → T1 = ZF<<6 | SF<<7.
+ *   - Patch saved flags: CLR = ~(CF|ZF|SF|OF); OR in T1 (CF=OF=0, ZF/SF from result).
+ *
+ * Three scratch GPRs: first three ids not in {D, S1, S2, rsp=4}. With at most 4
+ * distinct exclusions, 12+ candidates remain — always at least 3. No rcx/dst==rcx
+ * constraint (no variable shift needed; NOT and AND are not CL-dependent).
+ * Decline: any of dst, src1, src2 == rsp(4) (we move rsp for the stack frame).
+ * ========================================================================== */
+static int minspill_andn_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_ANDN) return 0;
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->a_src == OPND_MEM || d->b_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;
+    if (d->dst  < 0 || d->dst  > 15) return 0;
+    if (d->a_src < 0 || d->a_src > 15) return 0;
+    if (d->b_src < 0 || d->b_src > 15) return 0;
+    if (d->bmi_dst2 != OPND_NONE || d->bmi_s1_rdx) return 0;
+    if (d->dst == 4 || d->a_src == 4 || d->b_src == 4) return 0;  /* rsp -> fall back */
+    return 1;
+}
+
+static int emit_minspill_andn(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_andn_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const uint32_t CLR = 0xFFFFF73Eu;   /* ~(CF|ZF|SF|OF); sign-extends, preserves PF/AF */
+    const int D = d->dst, S1 = d->a_src, S2 = d->b_src;
+    /* Three scratch GPRs: first three ids not in {D, S1, S2, rsp=4}. At most 4 distinct
+     * exclusions from 16 regs leaves 12+ candidates — always at least 3 available. */
+    int T1 = -1, T2 = -1, T3 = -1;
+    for (int r = 0; r < 16 && T3 < 0; r++){
+        if (r == D || r == S1 || r == S2 || r == 4) continue;
+        if (T1 < 0) T1 = r; else if (T2 < 0) T2 = r; else T3 = r;
+    }
+    if (T1 < 0 || T2 < 0 || T3 < 0) return 0;
+
+    gb_lea_rsp(p, -128);                 /* step past red zone; no flag effect */
+    gb_push(p, T1); gb_push(p, T2); gb_push(p, T3);
+    gb_pushfq(p);                        /* [rsp] = ORIGINAL program flags (PF/AF source) */
+
+    /* Compute result into T1 BEFORE writing D (aliasing-safe: D may equal S1 or S2).
+     * NOT does not affect flags, so the pushfq image remains the original; AND clobbers
+     * flags but the image was already saved. */
+    gb_mov(p, w, T1, S1);               /* T1 = src1 (read before D is written) */
+    gb_not(p, w, T1);                    /* T1 = ~src1 (does NOT touch flags) */
+    gb_and(p, w, T1, S2);              /* T1 = (~src1) & src2 (S2 not yet overwritten; D not written) */
+    gb_mov(p, w, D, T1);               /* D = result; opsize32 zero-extends to 64 */
+
+    /* CF=0 for ANDN: zero T1 so emit_zfsf_bits starts with CF contribution = 0.
+     * This xor clobbers live flags, but emit_zfsf_bits begins with test D,D which
+     * re-establishes ZF and SF from the result; the live flags after xor are discarded. */
+    gb_xor(p, 1, T1, T1);              /* T1 = 0 (CF=0 ; OF=0 is not OR'd in) */
+    emit_zfsf_bits(p, w, D, T1, T2, T3);  /* T1 = (ZF<<6)|(SF<<7) ; CF/OF stay 0 */
+
+    /* Patch saved flags image: clear CF|ZF|SF|OF, OR in computed; preserve PF/AF/rest.
+     * Since CF and OF were never set in T1, they remain 0 after the OR. */
+    gb_and_rsp_imm32(p, CLR);
+    gb_or_rsp_reg(p, T1);
+    gb_popfq(p);                         /* live flags = patched original */
+    gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
+    gb_lea_rsp(p, 128);                  /* restore rsp above red zone; no flag effect */
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* ==========================================================================
+ * Minimal-spill, LIVE-REGISTER MULX thunk (the hardest op in the set).
+ *
+ * MULX dlo, dhi, src : unsigned widening multiply. s1 = IMPLICIT rdx (gpr[2]);
+ * s2 = src (rm register). Product = s1*s2 (opsize32 -> 64-bit; opsize64 -> 128-bit).
+ * dlo (= d->dst) = LOW half; dhi (= d->bmi_dst2) = HIGH half. MULX affects NO flags.
+ *
+ * Base-ISA lowering uses `MUL T` ((r)dx:(r)ax = (r)ax * T), which clobbers rax, rdx
+ * AND flags — but MULX must leave every register except dlo/dhi unchanged and touch
+ * no flags. So the thunk:
+ *   - pushfq/popfq around everything (MUL sets CF/OF; MULX defines none).
+ *   - saves rax and rdx to the stack IF they are not in {dlo,dhi} (they legitimately
+ *     receive the product when they ARE dests); restores in LIFO order.
+ *   - reads s2 (src) into scratch T BEFORE clobbering rax (src may itself be rax/rdx).
+ *   - moves the live rdx (s1) into rax, then MUL T -> rdx:rax = s1*s2.
+ *   - shuffles low(rax)/high(rdx) into dlo/dhi using T as a temp so NO product half is
+ *     lost under ANY {dlo,dhi} x {rax,rdx} aliasing (incl. the swapped dlo==rdx &
+ *     dhi==rax): T=high; dlo=low; dhi=T. T is chosen distinct from rax/rdx/dlo/dhi,
+ *     so all three moves are safe regardless of aliasing. dhi is written LAST so
+ *     the dlo==dhi form keeps the HIGH half (hardware writes DEST2=lo then DEST1=hi).
+ *   - opsize32: 32-bit MUL zero-extends eax/edx to the full 64-bit regs (matches
+ *     bmi_exec's (u32)p / (u32)(p>>32)); opsize64: 64-bit MUL.
+ * Declines rsp (4) as dlo/dhi/src (the thunk uses rsp as its working stack).
+ * ========================================================================== */
+static int minspill_mulx_supported(const decoded *d){
+    if (!d->is_bmi || d->op != BMI_MULX) return 0;
+    if (!d->bmi_s1_rdx) return 0;                    /* s1 must be implicit rdx */
+    if (d->dst_kind != DST_GPR) return 0;
+    if (!(d->opsize == 32 || d->opsize == 64)) return 0;
+    if (d->seg != 0) return 0;
+    if (d->b_src == OPND_MEM || d->dst_kind == DST_MEM) return 0;  /* src reg only */
+    if (d->dst      < 0 || d->dst      > 15) return 0;  /* dlo */
+    if (d->bmi_dst2 < 0 || d->bmi_dst2 > 15) return 0;  /* dhi */
+    if (d->b_src    < 0 || d->b_src    > 15) return 0;  /* src (s2) */
+    if (d->dst == 4 || d->bmi_dst2 == 4 || d->b_src == 4) return 0;  /* rsp -> fall back */
+    return 1;
+}
+
+static int emit_minspill_mulx(uint8_t **p, const decoded *d, uint64_t resume){
+    if (!minspill_mulx_supported(d)) return 0;
+    const int w = (d->opsize == 64);
+    const int RAX = 0, RDX = 2;
+    const int DLO = d->dst, DHI = d->bmi_dst2, SRC = d->b_src;
+    /* One scratch T: first id not in {rax, rdx, dlo, dhi, rsp}. At most 5 distinct
+     * exclusions from 16 regs => always available. T may equal SRC (src is only read,
+     * and if T==SRC it is not a dest, so the pop below restores it). */
+    int T = -1;
+    for (int r = 0; r < 16; r++){ if (r==RAX||r==RDX||r==DLO||r==DHI||r==4) continue; T = r; break; }
+    if (T < 0) return 0;
+    const int save_rax = (RAX != DLO && RAX != DHI);   /* preserve rax if not a dest */
+    const int save_rdx = (RDX != DLO && RDX != DHI);   /* preserve rdx if not a dest */
+
+    gb_lea_rsp(p, -128);              /* step past red zone; lea has no flag effect */
+    gb_pushfq(p);                     /* save ALL flags (MUL clobbers; MULX defines none) */
+    if (save_rax) gb_push(p, RAX);
+    if (save_rdx) gb_push(p, RDX);
+    gb_push(p, T);
+
+    gb_mov(p, w, T, SRC);             /* T = s2 (read src BEFORE rax is clobbered; src may be rax/rdx) */
+    gb_mov(p, w, RAX, RDX);           /* rax = s1 = live rdx (rdx still holds its value) */
+    gb_mul_reg(p, w, T);              /* rdx:rax = s1 * s2 (rax=low, rdx=high; clobbers flags) */
+    /* Place low/high into dlo/dhi via T so no half is lost under any aliasing
+     * (incl. swapped dlo==rdx & dhi==rax). T != rax/rdx/dlo/dhi by construction.
+     * ORDER MATTERS: low first, high LAST — hardware writes DEST2(lo) then
+     * DEST1(hi), so dlo==dhi keeps the HIGH half (real 2.1.185 code uses
+     * `mulx rax,rax,rax`-style forms to take just the high half). */
+    gb_mov(p, 1, T,   RDX);           /* T   = high (rdx may be dlo — save it first) */
+    gb_mov(p, 1, DLO, RAX);           /* dlo = low  (rax already zero-extended for opsize32) */
+    gb_mov(p, 1, DHI, T);             /* dhi = high (written LAST: dlo==dhi -> high wins) */
+
+    gb_pop(p, T);
+    if (save_rdx) gb_pop(p, RDX);     /* reverse LIFO order */
+    if (save_rax) gb_pop(p, RAX);
+    gb_popfq(p);                      /* restore original flags unchanged (MULX defines none) */
+    gb_lea_rsp(p, 128);
+    gb_jmp_abs(p, resume);
+    return 1;
+}
+
+/* Dispatch: emit whichever supported minimal-spill op `d` is. Returns 1 on emit. */
+static int emit_minspill_op(uint8_t **p, const decoded *d, uint64_t resume){
+    if (minspill_lzcnt_supported(d))  return emit_minspill_lzcnt(p, d, resume);
+    if (minspill_shlx_supported(d))   return emit_minspill_shlx(p, d, resume);
+    if (minspill_tzcnt_supported(d))  return emit_minspill_tzcnt(p, d, resume);
+    if (minspill_shrx_supported(d))   return emit_minspill_shrx(p, d, resume);
+    if (minspill_sarx_supported(d))   return emit_minspill_sarx(p, d, resume);
+    if (minspill_rorx_supported(d))   return emit_minspill_rorx(p, d, resume);
+    if (minspill_bzhi_supported(d))   return emit_minspill_bzhi(p, d, resume);
+    if (minspill_blsr_supported(d))   return emit_minspill_blsr(p, d, resume);
+    if (minspill_blsi_supported(d))   return emit_minspill_blsi(p, d, resume);
+    if (minspill_blsmsk_supported(d)) return emit_minspill_blsmsk(p, d, resume);
+    if (minspill_andn_supported(d))   return emit_minspill_andn(p, d, resume);
+    if (minspill_mulx_supported(d))   return emit_minspill_mulx(p, d, resume);
+    return 0;
+}
+static int minspill_supported(const decoded *d){
+    return minspill_lzcnt_supported(d)  || minspill_shlx_supported(d)  || minspill_tzcnt_supported(d)
+        || minspill_shrx_supported(d)   || minspill_sarx_supported(d)  || minspill_rorx_supported(d)
+        || minspill_bzhi_supported(d)   || minspill_blsr_supported(d)
+        || minspill_blsi_supported(d)   || minspill_blsmsk_supported(d)
+        || minspill_andn_supported(d)   || minspill_mulx_supported(d);
+}
+
+/* Emit a minimal-spill thunk for any supported op into the RWX pool; return its
+ * entry (the jmp site target), or NULL if unsupported / pool exhausted. Emits
+ * DIRECTLY into the pool (the trailing jmp rel32 is position-dependent). Non-static
+ * so the differential test can exercise the emitter in isolation. */
+void *avxemu_emit_minspill_block(const decoded *d, uint64_t resume){
+    if (!minspill_supported(d)) return 0;
+    uint8_t *blk = avxemu_pool_alloc(256);     /* thunk is < 256 bytes (bzhi uses ~170) */
+    if (!blk) return 0;
+    uint8_t *p = blk;
+    if (!emit_minspill_op(&p, d, resume)) return 0;
+    return blk;
+}
+
+/* AVXEMU_MINSPILL: opt-in (default OFF) for the Phase-1a hypothesis A/B. Flipped
+ * on only after the gate confirms the per-op-spill hypothesis. */
+static int minspill_enabled(void){ const char *e = getenv("AVXEMU_MINSPILL"); return e && e[0] != '0'; }
+
+/* Minimal-spill thunk for a single supported op (lzcnt / shlx). Returns the entry,
+ * or 0 (caller falls back to the existing full-spill selection — no regression).
+ * Single-op only for now: 78% of trampolined runs are single-instruction;
+ * multi-op minimal runs are a later op-set task. */
+void *avxemu_build_thunk_minspill(const tramp_insn *insns, int n, uint64_t resume){
+    if (n != 1) return 0;
+    if (!minspill_supported(&insns[0].dec)) return 0;
+    return avxemu_emit_minspill_block(&insns[0].dec, resume);
+}
+
 /* Emit the native scalar-GPR `block` for a run into the RWX pool. Returns the
  * block entry, or NULL if any instruction is unsupported or the pool is
  * exhausted. Bypasses the AVXEMU_NATIVE gate (the gate is in the thunk builder)
  * so the differential test can always exercise it. */
 void *avxemu_emit_native_block_bmi(const tramp_insn *insns, int n){
     if (n <= 0) return 0;
-    for (int i = 0; i < n; i++) if (!bmi_native_insn_supported(&insns[i].dec)) return 0;
+    for (int i = 0; i < n; i++) if (!bmi_block_op_supported(&insns[i].dec)) return 0;
     uint8_t buf[MAXRUN * 160];
     uint8_t *p = buf;
     for (int i = 0; i < n; i++){
-        if (!gb_emit_lzcnt(&p, &insns[i].dec)) return 0;
+        if (!gb_emit_bmi(&p, &insns[i].dec)) return 0;
         if ((size_t)(p - buf) > sizeof buf - 128) return 0;   /* overflow guard */
     }
     nb(&p, 0xC3);   /* ret */
@@ -731,7 +1711,7 @@ void *avxemu_emit_native_block_bmi(const tramp_insn *insns, int n){
 /* True iff every instruction in the run is a scalar-GPR op the native block
  * supports (currently: register-operand LZCNT). */
 static int run_is_native_bmi(const tramp_insn *insns, int n){
-    for (int i = 0; i < n; i++) if (!bmi_native_insn_supported(&insns[i].dec)) return 0;
+    for (int i = 0; i < n; i++) if (!bmi_block_op_supported(&insns[i].dec)) return 0;
     return n > 0;
 }
 
@@ -787,7 +1767,17 @@ static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_of
          * AVXEMU_NATIVE, default ON). On NULL — op outside the supported set, a
          * segment/mem-dest operand, pool exhausted, or gate off — fall back to the
          * existing C-dispatch thunk selection (full/gpr/bmi). No correctness risk. */
-        void *thunk = g_force_full ? 0 : avxemu_build_thunk_native(ri, rn, res);
+        /* Phase 1a (AVXEMU_MINSPILL, default OFF): a minimal-spill live-register
+         * thunk for a single supported lzcnt — highest priority when enabled. On
+         * NULL (gate off, not a single supported lzcnt, rsp operand, or pool
+         * exhausted) fall through to the existing selection. With the env unset,
+         * minspill_enabled() is false => behavior byte-identical to before. The
+         * site `s` was already chosen branch-target-safe by the loop above. */
+        void *thunk = (minspill_enabled() && !g_force_full)
+                          ? avxemu_build_thunk_minspill(ri, rn, res) : 0;
+        /* Milestone B: register-resident native-SSE thunk (gated by AVXEMU_NATIVE,
+         * default ON). NULL -> fall back to the existing C-dispatch selection. */
+        if (!thunk) thunk = g_force_full ? 0 : avxemu_build_thunk_native(ri, rn, res);
         /* Task 2: scalar-GPR native (register-only LZCNT) via the tt2 thunk. The
          * vector native attempt above declines BMI ops, so this runs next. NULL
          * (gate off, op outside the scalar set, or pool exhausted) -> existing C
