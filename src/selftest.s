@@ -4,7 +4,7 @@
 // are AVX1 (vmovupd ymm) and run natively. Used by the in-dylib self-test and
 // by the host fault-injection test.
 
-.text
+.section __TEXT,__avxemu_raw,regular,pure_instructions
 .align 4
 
 // vpaddd ymm0 = ymm1 + ymm2   (vector reg-reg: ymm read x2, ymm write)

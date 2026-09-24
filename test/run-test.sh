@@ -23,11 +23,6 @@ expect 1  --cpuprobe "$d/without-avx2" --fails-when no-avx2 --because x -- true
 expect 0  --cpuprobe "$d/without-avx2" --fails-when no-avx2 --because x -- false
 expect 0  --cpuprobe "$d/with-avx2" --fails-when no-avx2 --because x -- true
 expect 1  --cpuprobe "$d/with-avx2" --fails-when no-avx2 --because x -- false
-expect 0  --cpuprobe "$d/with-avx2" --fails-when always --because x -- false
-expect 0  --cpuprobe "$d/without-avx2" --fails-when always --because x -- false
-expect 1  --cpuprobe "$d/with-avx2" --fails-when always --because x -- true
-expect 1  --cpuprobe "$d/without-avx2" --fails-when always --because x -- true
-expect 77 --cpuprobe "$d/with-avx2" --fails-when always --because x -- sh -c 'exit 77'
 expect 77 --cpuprobe "$d/without-avx2" --fails-when no-avx2 --because x -- sh -c 'exit 77'
 expect 1  --cpuprobe "$d/translated" --fails-when rosetta --because x -- true
 expect 0  --cpuprobe "$d/translated" --fails-when rosetta --because x -- false

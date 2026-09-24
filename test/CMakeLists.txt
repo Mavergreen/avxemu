@@ -21,18 +21,16 @@ function(avxemu_test_exe name)
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
 endfunction()
 
-set(STUBS_IN_TEXT "on a CPU without AVX2, avxemu's load-time passes rewrite this test's own stubs in __text before main -- the core is linked into this test program -- and the test dies or decodes the wrong bytes; on a CPU with AVX2 the passes leave them alone and it passes; the follow-up fix 'keep test and self-test stubs out of __text, ...' (release 2) fixes it")
-
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
 avxemu_test_exe(inject SOURCES inject.c stubs.s LINK avxemu_core avxemu_asm)
-add_test(NAME inject COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:inject>)
+add_test(NAME inject COMMAND $<TARGET_FILE:inject>)
 
 avxemu_test_exe(memtest SOURCES memtest.c memtest.s LINK avxemu_core avxemu_asm)
-add_test(NAME memtest COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:memtest>)
+add_test(NAME memtest COMMAND $<TARGET_FILE:memtest>)
 
 avxemu_test_exe(tramptest SOURCES tramptest.c tramp_harness.s LINK avxemu_core avxemu_asm)
-add_test(NAME tramptest COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:tramptest>)
+add_test(NAME tramptest COMMAND $<TARGET_FILE:tramptest>)
 
 avxemu_test_exe(overread SOURCES overread.c LINK avxemu_core avxemu_asm)
 add_test(NAME overread COMMAND $<TARGET_FILE:overread>)
@@ -82,7 +80,7 @@ set_tests_properties(refdigest PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 
 set(AVXEMU_REPLAY_PROGRAMS "")
 function(avxemu_oracle name)
-  cmake_parse_arguments(A "UNREGISTERED" "" "DRIVER;HW;ASM;LINK" ${ARGN})
+  cmake_parse_arguments(A "" "" "DRIVER;HW;ASM;LINK" ${ARGN})
   avxemu_objects(${name}_driver ${A_DRIVER})
   target_include_directories(${name}_driver PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
   set(objs $<TARGET_OBJECTS:${name}_driver> $<TARGET_OBJECTS:t_refdigest>)
@@ -98,9 +96,6 @@ function(avxemu_oracle name)
   add_executable(${name} ${A_ASM} ${objs})
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
   set(AVXEMU_REPLAY_PROGRAMS ${AVXEMU_REPLAY_PROGRAMS} ${name} PARENT_SCOPE)
-  if(A_UNREGISTERED)
-    return()
-  endif()
   add_test(NAME ${name}-replay COMMAND $<TARGET_FILE:${name}> check "${CMAKE_CURRENT_SOURCE_DIR}/reference/${name}.ref")
   add_test(NAME ${name}-record COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/record-matches.sh" $<TARGET_FILE:${name}>
            "${CMAKE_BINARY_DIR}/reference/${name}.ref" "${CMAKE_CURRENT_SOURCE_DIR}/reference/${name}.ref")
@@ -117,11 +112,7 @@ avxemu_oracle(bmi_oracle DRIVER bmi_oracle.c HW bmi_hw.c LINK t_bmi)
 
 avxemu_oracle(patchtest DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.s LINK avxemu_core avxemu_asm)
 
-# Built, so its driver stays compiled and inside vex-leak-replay, but not registered: at this
-# source it still dies on a CPU without AVX2 (STUBS_IN_TEXT), so it can neither replay
-# there nor prove anything by recording. The follow-up fix 'keep test and self-test stubs out of
-# __text, ...' (release 2) registers it, with its reference.
-avxemu_oracle(bmimem UNREGISTERED DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
+avxemu_oracle(bmimem DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
 
 avxemu_objects(t_decode "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_objects(t_lde "${PROJECT_SOURCE_DIR}/src/lde.c")

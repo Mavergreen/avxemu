@@ -63,8 +63,7 @@ Everything passes or skips; this is the only place the `mavericks` label (10.9's
     CLAUDE_BIN=<a Claude Code binary> shipyard-ctest --preset cross -L hardware
 
 Every `*-record` test must say `recording matches`: the committed references still agree
-with silicon. (`bmimem` has no reference and no registered test yet; at this source it dies
-on a CPU without AVX2.)
+with silicon.
 
 ### Before dispatching
 

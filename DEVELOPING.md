@@ -28,23 +28,18 @@ Each test carries a label for what it needs. A test whose need is unmet skips.
 
 To run one label: `shipyard-ctest --preset native -L replay`.
 
-**How replay works.** `oracle` and `bmi_oracle` run each instruction on the real CPU and in the
-emulator side by side, in `record` mode, and write `test/reference/<name>.ref`: per op, a digest
-of the hardware's outputs. `check` mode replays the emulator alone against that file. So the
-emulator is checked against silicon on CPUs that lack the instructions.
+**How replay works.** `oracle`, `bmi_oracle`, `patchtest` and `bmimem` run each instruction on
+the real CPU and in the emulator side by side, in `record` mode, and write
+`test/reference/<name>.ref`: per op, a digest of the hardware's outputs. `check` mode replays the
+emulator alone against that file. So the emulator is checked against silicon on CPUs that lack
+the instructions.
 
 **Re-recording a reference:** see INGREDIENTS.md, "Releasing".
 
 ## Known failures
 
-On a CPU without AVX2, a test program that links the emulator's core into itself has its own
-stubs rewritten at load: avxemu's load-time passes patch the `__text` they live in. A later
-fix in release 2 moves them out of `__text`.
-
-- `inject`, `memtest` and `tramptest` are marked `--fails-when no-avx2`.
 - `overread-fault` is marked `--fails-when rosetta`. Under Rosetta the fault handler does not
   repair the straddling read. Cause not yet diagnosed.
-- The `bmimem` oracle is built, but not registered as a test, and has no reference.
 
 A marked test that starts passing fails with `UNEXPECTED PASS`. Remove its mark.
 
@@ -175,8 +170,7 @@ Only a native build without AVX2 beats this.
 - **On a real Ivy Bridge Mac:** the AVX1 signal-frame layout, coexistence with Bun's handlers,
   and end-to-end use. The decisive bug found there: the thunk used `sub` to set up its frame,
   which clobbered the flags before saving them, so a branch after a scheduled `vpbroadcast` went
-  wrong. The fix is `lea`. `tramptest` seeds every flag to catch this class of bug, but it guards
-  only from release 2.
+  wrong. The fix is `lea`. `tramptest` seeds every flag to catch this class of bug.
 
 ## Where things are
 
@@ -199,6 +193,7 @@ holds mnemonic strings for diagnostics.
 | file | checks |
 |---|---|
 | `oracle.c`, `bmi_oracle.c` | emulator vs hardware: vectors and FMA; BMI values and flags |
+| `patchtest.c`, `bmimem.c` | emulator vs hardware: patched lzcnt/tzcnt; BMI with a memory operand |
 | `bintest.c`, `zdecode.c`, `patchdiff.c` | decoder and lzcnt patch over the real Claude binary |
 | `fuzz.c` | native vs emulated, full 16-`ymm` compare |
 | `tramptest.c`, `memtest.c`, `inject.c` | thunks, every addressing mode, fault injection end to end |

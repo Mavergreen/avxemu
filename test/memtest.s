@@ -3,7 +3,7 @@
 // points the address at a scratch buffer and checks against ymm1 + mem.
 // These are fixed (not copied), so RIP-relative works.
 
-.text
+.section __TEXT,__avxemu_test,regular,pure_instructions
 .align 4
 
 // base + disp8 : 16(%rsi)

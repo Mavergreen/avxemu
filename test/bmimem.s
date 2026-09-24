@@ -6,7 +6,7 @@
 //
 // Convention: rdi = &mem (8-byte operand), rsi = scalar 2nd operand -> rax.
 
-.text
+.section __TEXT,__avxemu_test,regular,pure_instructions
 .align 4
 
 // --- memory as the a_src (read into s1) ---

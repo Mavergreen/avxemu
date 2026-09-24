@@ -2,7 +2,7 @@
 // the decoder test reads (never executed). The e2e_* fault-injection stubs live
 // in ../src/selftest.s (shared with the in-dylib self-test).
 
-.text
+.section __TEXT,__avxemu_test,regular,pure_instructions
 .align 4
 .globl _DI0
 _DI0:  vpaddd %ymm2,%ymm1,%ymm0

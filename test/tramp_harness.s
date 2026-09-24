@@ -10,7 +10,7 @@ g_out:     .quad 0
 g_thunk:   .quad 0
 g_scratch: .quad 0
 
-.text
+.section __TEXT,__avxemu_test,regular,pure_instructions
 .align 4
 .globl _tramp_test_invoke
 _tramp_test_invoke:                 // rdi=thunk, rsi=in, rdx=out
@@ -99,7 +99,7 @@ _tramp_test_capture:                // thunk resumes here with the post-run stat
 
 // Sample instructions (never executed) so the test decodes assembler-correct
 // bytes instead of hand-encoded ones. Read via the _ti_labels array.
-.text
+.section __TEXT,__avxemu_test,regular,pure_instructions
 .align 4
 _ti0: vpaddd %ymm2,%ymm1,%ymm0      // ymm0 = ymm1 + ymm2
 _ti1: vpxor  %ymm4,%ymm3,%ymm5      // ymm5 = ymm3 ^ ymm4
