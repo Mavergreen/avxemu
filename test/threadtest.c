@@ -32,6 +32,7 @@
 extern const uint8_t tt_body_start[], tt_body_site[], tt_body_end[];
 extern void  *avxemu_pool_base(void);
 extern void   avxemu_patch_safe_test_region(uint8_t *base, size_t size);
+extern void   avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]);
 
 #define MAXTHREADS 64
 #define NFUNCS   256
@@ -106,6 +107,13 @@ static int trial(void) {
 }
 
 int main(int argc, char **argv) {
+    /* On a CPU with AVX2 the loop never faults, so nothing relocates and there
+     * is no race to run. Asked of the raw CPU: a plain cpuid here would be
+     * trapped and answered with the AVX2 avxemu advertises. */
+    uint32_t r[4];
+    avxemu_cpuid_raw(7, 0, r);
+    if (r[1] & (1u << 5)) { printf("threadtest: skipped, this CPU has AVX2\n"); return 77; }   /* ctest: SKIP */
+
     int trials = argc > 1 ? atoi(argv[1]) : 20;
     if (argc > 2) g_nthreads = atoi(argv[2]);
     if (g_nthreads < 1 || g_nthreads > MAXTHREADS) { fprintf(stderr, "threads: 1..%d\n", MAXTHREADS); return 2; }
