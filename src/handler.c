@@ -44,12 +44,43 @@ static int g_owned_sigill = 0;          /* our SIGILL handler is installed */
  * the eager trampoliner couldn't patch (no room for a 5-byte jmp) keeps trapping
  * forever at ~57us/round-trip. We count #UDs per RIP and, once a RIP crosses a
  * threshold, relocate its block (avxemu_relocate_block) so it stops faulting. The
- * table is a fixed open-addressed RIP->count map (no allocation in the handler).
+ * table is a fixed open-addressed RIP->site map (no allocation in the handler).
+ *
+ * Every thread faults into this handler, so the table is shared: slots are
+ * claimed with a CAS and counted with atomic adds, and never freed. What a
+ * site's relocation needs to prove, build or write happens under g_reloc_lock,
+ * which also covers the state reloc.c and tramp.c keep in statics (the pool
+ * cursor, the patch-safety scratch map). Holders are all inside this handler
+ * doing bounded work, so a waiter spins briefly — and never on itself: signals
+ * are blocked while it is held, so no other handler can interrupt the holder
+ * and fault its way back in here.
  */
 #define HOT_SLOTS 4096
 #define HOT_THRESHOLD 50          /* faults at one RIP before we relocate it */
-static struct { uint64_t rip; uint32_t n; } g_hot[HOT_SLOTS];
+enum { SITE_NEW, SITE_RELOCATABLE, SITE_NEVER };
+static struct {
+    uint64_t rip;
+    uint32_t n;
+    volatile uint8_t state;       /* SITE_*; written under g_reloc_lock */
+    volatile uint8_t patched;     /* set by reloc.c just before the jmp lands */
+    uint8_t *resume;              /* RELOCATABLE: where an emulation resumes */
+} g_hot[HOT_SLOTS];
 static int g_reloc_enabled = 1;   /* AVXEMU_RELOC=0 disables (A/B) */
+static volatile int g_reloc_lock;
+
+static void reloc_lock(sigset_t *saved) {
+    sigset_t all; sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK, &all, saved);
+    while (__sync_lock_test_and_set(&g_reloc_lock, 1))
+        while (g_reloc_lock) __asm__ volatile("pause");
+}
+static void reloc_unlock(const sigset_t *saved) {
+    __sync_lock_release(&g_reloc_lock);
+    pthread_sigmask(SIG_SETMASK, saved, 0);
+}
+
+extern int avxemu_reloc_prepare(uint8_t *site, uint8_t **resume);
+extern int avxemu_reloc_commit(uint8_t *site, uint8_t *resume, volatile uint8_t *patched);
 
 /* AVXEMU_FAULTHIST=1 diagnostic: periodically dump the g_hot RIP->count table
  * (i.e. every site still faulting into the handler) to /tmp/faulthist.out so a
@@ -114,10 +145,10 @@ static void faultsnap_dump(uint64_t rip, _STRUCT_X86_THREAD_STATE64 *ss){
     close(fd);
 }
 
-/* declined-relocation log: (rip, reason) recorded once per site when hot_bump
- * fires and avxemu_relocate_block returns 0. Reasons (reloc.c RELOC_DECLINE):
+/* declined-relocation log: (rip, reason) recorded once per site, when its
+ * relocation is first found impossible (at its first fault, or at the commit). Reasons (reloc.c RELOC_DECLINE):
  * 1=pool-init 2=decode 3=not-faulting 4=window 5=patch-safety 6=pool-alloc
- * 7=rel32-range 8=site-write */
+ * 7=rel32-range 8=site-write 9=jmp-straddles-cache-line */
 extern int avxemu_reloc_last_reason;
 static struct { uint64_t rip; int reason; } g_declined[512];
 static int g_ndeclined;
@@ -144,7 +175,7 @@ static void faulthist_dump(void){
         seen_n = bn; seen_max = brip;
     }
     (void)write(fd, "TOTAL_FAULTS\t", 13); fh_u64(fd, g_faulthist_total); (void)write(fd, "\n", 1);
-    static const char dh[] = "=== relocation DECLINES (rip, reason: 1=pool-init 2=decode 3=not-faulting 4=window 5=patch-safety 6=pool-alloc 7=rel32 8=site-write) ===\n";
+    static const char dh[] = "=== relocation DECLINES (rip, reason: 1=pool-init 2=decode 3=not-faulting 4=window 5=patch-safety 6=pool-alloc 7=rel32 8=site-write 9=line-straddle) ===\n";
     (void)write(fd, dh, sizeof dh - 1);
     for (int i = 0; i < g_ndeclined; i++){
         fh_hex(fd, g_declined[i].rip); (void)write(fd, "\tR", 2);
@@ -153,14 +184,32 @@ static void faulthist_dump(void){
     close(fd);
     (void)rename("/tmp/faulthist.out.tmp", "/tmp/faulthist.out");
 }
-static int hot_bump(uint64_t rip) {     /* returns 1 exactly when count crosses threshold */
+/* The site's slot if it has one, without claiming. */
+static int site_lookup(uint64_t rip) {
     uint32_t i = (uint32_t)((rip * 0x9e3779b97f4a7c15ull) >> 52) & (HOT_SLOTS - 1);
     for (int probe = 0; probe < 8; probe++) {
         uint32_t k = (i + probe) & (HOT_SLOTS - 1);
-        if (g_hot[k].rip == rip) return ++g_hot[k].n == HOT_THRESHOLD;
-        if (g_hot[k].rip == 0)   { g_hot[k].rip = rip; g_hot[k].n = 1; return HOT_THRESHOLD == 1; }
+        uint64_t r = g_hot[k].rip;
+        if (r == rip) return (int)k;
+        if (r == 0) return -1;
     }
-    return 0;
+    return -1;
+}
+
+/* The site's slot, claimed if new; -1 if its probe run is full (then the site
+ * is simply never relocated, which is always safe). */
+static int site_slot(uint64_t rip) {
+    uint32_t i = (uint32_t)((rip * 0x9e3779b97f4a7c15ull) >> 52) & (HOT_SLOTS - 1);
+    for (int probe = 0; probe < 8; probe++) {
+        uint32_t k = (i + probe) & (HOT_SLOTS - 1);
+        uint64_t r = g_hot[k].rip;
+        if (r == rip) return (int)k;
+        if (r == 0) {
+            r = __sync_val_compare_and_swap(&g_hot[k].rip, 0, rip);
+            if (r == 0 || r == rip) return (int)k;
+        }
+    }
+    return -1;
 }
 
 /*
@@ -577,7 +626,18 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
     if (avxemu_test_ud2 && ip[0] == 0x0F && ip[1] == 0x0B) base = rip + 2;  /* skip injected ud2 */
     const uint8_t *bp = (const uint8_t *)base;
     decoded d;
-    if (!decode(bp, &d)) { chain(sig, info, uctx); return; }   /* genuine #UD: let it surface */
+    int dl = decode(bp, &d);
+    /* Another thread may have patched this site between our fault and our read
+     * of it: we then decoded its jmp (or, mid-store, a mix) rather than the op
+     * that faulted. reloc.c raises `patched` before the store, so reading it
+     * AFTER decoding tells us which — and the answer is simply to re-execute.
+     * Checked before chain(): the jmp is ours, not a genuine #UD. */
+    __asm__ volatile("" ::: "memory");             /* decode's reads stay before this one */
+    if (g_reloc_enabled) {
+        int k = site_lookup(base);
+        if (k >= 0 && g_hot[k].patched) { ss->__rip = base; return; }
+    }
+    if (!dl) { chain(sig, info, uctx); return; }   /* genuine #UD: let it surface */
     uint64_t rip_next = base + d.len;
 
     /* AVXEMU_FAULTHIST diagnostic: snapshot the still-faulting-RIP table periodically */
@@ -616,16 +676,45 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
      *
      * Gating matches the old post-write-back trigger, just moved earlier: reached
      * only on the normal emulated path (the cpuid trap and every unrecognised-#UD
-     * chain() return earlier), using the real faulting address `base`. hot_bump
-     * fires once per site.
+     * chain() return earlier), using the real faulting address `base`. One
+     * thread commits; any others that crossed the threshold with it see
+     * `patched` and re-enter too.
      */
-    if (g_reloc_enabled && hot_bump(base)) {
-        if (avxemu_relocate_block((uint8_t *)base)) {
-            ss->__rip = (uint64_t)base;   /* re-enter: the patched jmp runs the op once */
-            return;
+    int slot = g_reloc_enabled ? site_slot(base) : -1;
+    if (slot >= 0) {
+        if (g_hot[slot].state == SITE_NEW) {           /* first fault here: can it ever relocate? */
+            sigset_t saved; reloc_lock(&saved);
+            if (g_hot[slot].state == SITE_NEW) {
+                uint8_t *resume = 0;
+                if (avxemu_reloc_prepare((uint8_t *)base, &resume)) {
+                    g_hot[slot].resume = resume;
+                    __sync_synchronize();
+                    g_hot[slot].state = SITE_RELOCATABLE;
+                } else {
+                    g_hot[slot].state = SITE_NEVER;
+                    if (faulthist_enabled()) declined_log(base, avxemu_reloc_last_reason);
+                }
+            }
+            reloc_unlock(&saved);
         }
-        /* relocation declined -> fall through and emulate this instance normally */
-        if (faulthist_enabled()) declined_log(base, avxemu_reloc_last_reason);
+        uint32_t n = __sync_add_and_fetch(&g_hot[slot].n, 1);
+        if (g_hot[slot].state == SITE_RELOCATABLE && n >= HOT_THRESHOLD) {
+            sigset_t saved; reloc_lock(&saved);
+            int won = 0;
+            if (g_hot[slot].state == SITE_RELOCATABLE && !g_hot[slot].patched) {
+                won = avxemu_reloc_commit((uint8_t *)base, g_hot[slot].resume, &g_hot[slot].patched);
+                if (!won) {
+                    g_hot[slot].state = SITE_NEVER;
+                    if (faulthist_enabled()) declined_log(base, avxemu_reloc_last_reason);
+                }
+            }
+            reloc_unlock(&saved);
+            if (won || g_hot[slot].patched) {
+                ss->__rip = (uint64_t)base;   /* re-enter: the patched jmp runs the op once */
+                return;
+            }
+            /* declined -> fall through and emulate this instance normally */
+        }
     }
 
     /* Snapshot the signal's machine state into a register-file, run the shared
@@ -648,7 +737,11 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
         *gpr_ptr(ss, i) = rf.gpr[i];
     }
     ss->__rflags = rf.rflags;
-    ss->__rip    = rip_next;
+    /* A relocatable site resumes at its out-of-line tail, never at rip_next:
+     * rip_next may be inside the 5 bytes a later patch overwrites (reloc.c,
+     * avxemu_reloc_prepare). */
+    ss->__rip    = (slot >= 0 && g_hot[slot].state == SITE_RELOCATABLE)
+                 ? (uint64_t)(uintptr_t)g_hot[slot].resume : rip_next;
 }
 
 /*

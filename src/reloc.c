@@ -397,27 +397,51 @@ static int emit_lowering(uint8_t **p, const decoded *d){
     }
 }
 
-/* Patch [site,site+5) with `jmp rel32` (writable -> write -> executable).
+/* The 8-byte word the site's jmp is written through: it covers [site,site+5)
+ * and lies inside one 64-byte cache line, which is what makes a single store to
+ * it atomic — x86 guarantees that for any 8-byte access that doesn't cross a
+ * line, aligned or not, so another thread fetching the site sees the old bytes
+ * or the whole jmp, never half of it. NULL when the 5 bytes themselves straddle
+ * a line (about 1 site in 16): no single store covers them, so we decline. */
+static uint8_t *jmp_word(uint8_t *site) {
+    uintptr_t o = (uintptr_t)site & 63;
+    if (o + 5 > 64) return 0;
+    return o <= 56 ? site : site - (o - 56);
+}
+
+/* Patch [site,site+5) with `jmp rel32`, safely against other threads.
  *
- * MILESTONE-A LIMITATION (known, deferred): this flips a live __text page RW->RX
- * and writes the 5-byte jmp WHILE the program runs. In a multithreaded target
- * another thread executing this function could observe a half-written jmp or the
- * transient RW page, and corrupt. That is acceptable here because the startup spin
- * this targets is single-threaded main-thread (per the project brief): no other
- * thread is in this code at patch time. Cross-thread-safe live patching
- * (stop-the-world / atomic single-instruction patch) is out of scope for
- * Milestone A and deferred — do NOT rely on this being safe under concurrency. */
-static int patch_site_jmp(uint8_t *site, int64_t srel){
+ * Three things make this concurrent-safe, and each closes a crash threadtest
+ * reproduces:
+ *   - The page keeps EXECUTE throughout (RWX|COPY, verified on 10.9). Dropping
+ *     it for the write, as this used to, faults every other thread running
+ *     ANYTHING on the page (SIGBUS).
+ *   - The jmp lands in one atomic store (jmp_word), not as 1 + 4 bytes.
+ *   - *patched is raised BEFORE the store. The SIGILL handler reads it after
+ *     decoding, and x86 orders stores with stores and loads with loads, so a
+ *     handler that sees it clear decoded only old bytes; one that sees it set
+ *     re-executes the site instead of emulating a torn decode or chaining a
+ *     "genuine #UD" at what is now our jmp.
+ * The fourth hazard — a thread resuming INSIDE the 5 bytes — cannot arise:
+ * see avxemu_reloc_prepare. Callers hold the relocation lock (handler.c), so
+ * there is no competing writer to this word or this page's protection. */
+static int patch_site_jmp(uint8_t *site, int64_t srel, volatile uint8_t *patched){
     if (!in_i32(srel)) return 0;
+    uint8_t *w = jmp_word(site);
+    if (!w) return 0;
     mach_port_t task = mach_task_self();
-    uintptr_t lo = (uintptr_t)site & ~(uintptr_t)0xfff;
-    uintptr_t hi = ((uintptr_t)site + 5 + 0xfff) & ~(uintptr_t)0xfff;
-    if (vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) != KERN_SUCCESS)
+    uintptr_t lo = (uintptr_t)w & ~(uintptr_t)0xfff;   /* one line => one page */
+    if (vm_protect(task, (vm_address_t)lo, 0x1000, FALSE,
+                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY) != KERN_SUCCESS)
         return 0;
-    site[0] = 0xE9; { int32_t r32 = (int32_t)srel; memcpy(site + 1, &r32, 4); }
-    vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-               VM_PROT_READ | VM_PROT_EXECUTE);
+    uint8_t b[8];
+    memcpy(b, w, 8);
+    size_t k = (size_t)(site - w);
+    b[k] = 0xE9; { int32_t r32 = (int32_t)srel; memcpy(b + k + 1, &r32, 4); }
+    uint64_t v; memcpy(&v, b, 8);
+    *patched = 1;
+    __asm__ volatile("xchgq %0, (%1)" : "+r"(v) : "r"(w) : "memory");   /* the one store */
+    vm_protect(task, (vm_address_t)lo, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     return 1;
 }
 
@@ -435,17 +459,14 @@ static int patch_site_jmp(uint8_t *site, int64_t srel){
 int avxemu_reloc_last_reason;   /* diagnostic: why the last relocate declined (AVXEMU_FAULTHIST) */
 #define RELOC_DECLINE(r) do { avxemu_reloc_last_reason = (r); return 0; } while (0)
 
-int avxemu_relocate_block(uint8_t *site) {
-    if (!ensure_pool(site)) RELOC_DECLINE(1);
+/* Decode the faulting op at `site` and gather its window [site,end): whole
+ * following instructions until >=5 bytes, each safely copyable
+ * (position-independent). Returns the faulting op's length, or 0 (reason set). */
+static int reloc_window(uint8_t *site, decoded *fd, uint8_t **endp) {
+    int fl = decode(site, fd);
+    if (fl <= 0 || fd->op == 0) RELOC_DECLINE(2);
+    if (!block_faults(fd)) RELOC_DECLINE(3);
 
-    /* decode the faulting instruction */
-    decoded fd;
-    int fl = decode(site, &fd);
-    if (fl <= 0 || fd.op == 0) RELOC_DECLINE(2);
-    if (!block_faults(&fd)) RELOC_DECLINE(3);
-
-    /* build the window [site,end): walk WHOLE following instructions until >=5
-     * bytes; each added instruction must be safely copyable (position-independent) */
     const uint8_t *lim = site + WINDOW_LIM;
     uint8_t *end = site + fl;
     while ((size_t)(end - site) < 5) {
@@ -459,6 +480,34 @@ int avxemu_relocate_block(uint8_t *site) {
     /* the 5-byte jmp we write at the site must stay within the relocated window
      * (bytes [site+1,site+5) inside the gathered instruction boundaries) */
     if ((size_t)(end - site) < 5) RELOC_DECLINE(4);
+    *endp = end;
+    return fl;
+}
+
+/*
+ * Everything a relocation must prove, done at a site's FIRST fault rather than
+ * at its HOT_THRESHOLD-th, plus the one artifact concurrency needs: `*resume`,
+ * an out-of-line copy of the window's tail [site+fl, end) followed by
+ * `jmp end`.
+ *
+ * Why the tail matters: when the faulting op is shorter than 5 bytes, the jmp
+ * covers an instruction boundary (site+fl) that isn't its own start. A thread
+ * the handler has just emulated, resuming at site+fl, would execute the jmp's
+ * rel32 bytes as code if the patch landed first — at any moment, since it can
+ * be preempted there. Nothing else can put a thread at site+fl: the faulting op
+ * never completes natively, and avxemu_patch_safe proves no branch targets
+ * (site, site+5). So if the handler resumes every emulation of a relocatable
+ * site at *resume instead, from the first, no thread is ever inside the 5
+ * bytes to be hurt, and the patch needs no thread suspension.
+ *
+ * Returns 1 if the site can be relocated; 0 (reason set) if it never will be,
+ * in which case the handler resumes at site+fl as it always has.
+ */
+int avxemu_reloc_prepare(uint8_t *site, uint8_t **resume) {
+    if (!ensure_pool(site)) RELOC_DECLINE(1);
+    decoded fd; uint8_t *end;
+    int fl = reloc_window(site, &fd, &end);
+    if (!fl) return 0;
 
     /* Window patch-safety (Part 3): the 5-byte jmp we write clobbers [site,site+5).
      * If any branch ELSEWHERE in the program targets an address in the open interval
@@ -467,7 +516,27 @@ int avxemu_relocate_block(uint8_t *site) {
      * Declining here (the site keeps faulting/emulating, no corruption) is the safe
      * floor — we never trade correctness for speed. */
     if (!avxemu_patch_safe(site, 5)) RELOC_DECLINE(5);
+    if (!jmp_word(site)) RELOC_DECLINE(9);
 
+    size_t legal_len = (size_t)(end - (site + fl));
+    uint8_t *tail = avxemu_pool_alloc(legal_len + 5);
+    if (!tail) RELOC_DECLINE(6);
+    if (legal_len) memcpy(tail, site + fl, legal_len);
+    uint8_t *jb = tail + legal_len;
+    int64_t jrel = (int64_t)((uint8_t *)end - (jb + 5));
+    if (!in_i32(jrel)) RELOC_DECLINE(7);
+    jb[0] = 0xE9; { int32_t r32 = (int32_t)jrel; memcpy(jb + 1, &r32, 4); }
+    *resume = tail;
+    return 1;
+}
+
+/* Build the relocated block for a site avxemu_reloc_prepare accepted and write
+ * the jmp to it. `resume` is prepare's tail, which the emulator stub continues
+ * into. Returns 1 once the site is patched; *patched is set as it is. */
+int avxemu_reloc_commit(uint8_t *site, uint8_t *resume, volatile uint8_t *patched) {
+    decoded fd; uint8_t *end;
+    int fl = reloc_window(site, &fd, &end);
+    if (!fl) return 0;
     size_t legal_len = (size_t)(end - (site + fl));
 
     /* Task B: prefer an inline native lowering for the faulting op. If one
@@ -488,41 +557,38 @@ int avxemu_relocate_block(uint8_t *site) {
             int64_t jrel = (int64_t)((uint8_t *)end - (jb + 5));
             if (!in_i32(jrel)) RELOC_DECLINE(7);
             jb[0] = 0xE9; { int32_t r32 = (int32_t)jrel; memcpy(jb + 1, &r32, 4); }
-            if (!patch_site_jmp(site, srel)) RELOC_DECLINE(8);
+            if (!patch_site_jmp(site, srel, patched)) RELOC_DECLINE(8);
             avxemu_reloc_inlined++;
             return 1;
         }
     }
 
-    /* allocate stub + tail from the pool (stub is the entry the site jumps to) */
+    /* the stub is the entry the site jumps to; it resumes into prepare's tail */
     size_t code  = (size_t)(avxemu_tt_record - avxemu_tt_start);
     size_t recsz = sizeof(run_record) + sizeof(tramp_insn);
     uint8_t *stub = avxemu_pool_alloc(code + recsz);
-    uint8_t *tail = avxemu_pool_alloc(legal_len + 5);
-    if (!stub || !tail) RELOC_DECLINE(6);
+    if (!stub) RELOC_DECLINE(6);
 
     /* site -> stub must be a reachable rel32 jmp */
     int64_t srel = (int64_t)(stub - (site + 5));
     if (!in_i32(srel)) RELOC_DECLINE(7);
 
-    /* (a) stub: copy the tt template verbatim, wire dispatch + resume, append the
+    /* copy the tt template verbatim, wire dispatch + resume, append the
      * 1-instruction run_record for the faulting op (run via avxemu_emulate). */
     memcpy(stub, avxemu_tt_start, code);
     *(void   **)(stub + (avxemu_tt_dispatchptr - avxemu_tt_start)) = (void *)avxemu_tramp_dispatch;
-    *(uint64_t *)(stub + (avxemu_tt_resumeptr   - avxemu_tt_start)) = (uint64_t)(uintptr_t)tail;
+    *(uint64_t *)(stub + (avxemu_tt_resumeptr   - avxemu_tt_start)) = (uint64_t)(uintptr_t)resume;
     run_record *r = (run_record *)(stub + (avxemu_tt_record - avxemu_tt_start));
     r->n = 1; r->pad = 0;
     r->insns[0].addr = (uint64_t)(uintptr_t)site;
     r->insns[0].dec  = fd;
 
-    /* (b) tail: legal instructions verbatim, then jmp back to `end`. */
-    if (legal_len) memcpy(tail, site + fl, legal_len);
-    uint8_t *jb = tail + legal_len;
-    int64_t jrel = (int64_t)((uint8_t *)end - (jb + 5));
-    if (!in_i32(jrel)) RELOC_DECLINE(7);
-    jb[0] = 0xE9; { int32_t r32 = (int32_t)jrel; memcpy(jb + 1, &r32, 4); }
-
-    /* (c) patch the site with `jmp rel32 -> stub` (writable -> write -> executable). */
-    if (!patch_site_jmp(site, srel)) RELOC_DECLINE(8);
+    if (!patch_site_jmp(site, srel, patched)) RELOC_DECLINE(8);
     return 1;
+}
+
+/* Prepare + commit in one go: the single-threaded entry point (reloctest). */
+int avxemu_relocate_block(uint8_t *site) {
+    uint8_t *resume; volatile uint8_t patched = 0;
+    return avxemu_reloc_prepare(site, &resume) && avxemu_reloc_commit(site, resume, &patched);
 }

@@ -36,7 +36,7 @@ extern void   avxemu_patch_safe_test_region(uint8_t *base, size_t size);
 #define MAXTHREADS 64
 #define NFUNCS   256
 #define ITERS    400        /* > HOT_THRESHOLD, so every site relocates mid-run */
-#define STRIDE   64
+#define STRIDE   65     /* odd: the sites walk through every cache-line offset */
 
 typedef void (*body_fn)(uint64_t, uint32_t *);
 static uint8_t *g_buf;
@@ -84,6 +84,24 @@ static int trial(void) {
     g_go = 1;
     for (int i = 0; i < g_nthreads; i++) pthread_join(th[i], 0);
     if (g_bad) { fprintf(stderr, "%d wrong results\n", g_bad); return 1; }
+
+    /* Clean only counts if the race was actually run: every site must now be
+     * our jmp. (A patcher that declined everything would also be "clean".) The
+     * exception is a site whose 5 bytes cross a cache line: no single store can
+     * write it atomically, so it must be declined and left as it was. */
+    size_t so = (size_t)(tt_body_site - tt_body_start);
+    int patched = 0, want = 0;
+    for (int f = 0; f < NFUNCS; f++) {
+        const uint8_t *site = g_buf + (size_t)f * STRIDE + so;
+        int straddles = ((uintptr_t)site & 63) + 5 > 64;
+        want += !straddles;
+        if (straddles ? *site != 0xC5 : *site != 0xE9) {
+            fprintf(stderr, "site %d (line offset %d): 0x%02x\n", f, (int)((uintptr_t)site & 63), *site);
+            return 3;
+        }
+        patched += !straddles;
+    }
+    if (patched != want || want == 0) { fprintf(stderr, "only %d/%d sites relocated\n", patched, want); return 3; }
     return 0;
 }
 
@@ -100,7 +118,7 @@ int main(int argc, char **argv) {
         waitpid(p, &st, 0);
         if (WIFEXITED(st) && WEXITSTATUS(st) == 0) clean++;
         else if (WIFEXITED(st) && WEXITSTATUS(st) == 1) wrong++;
-        else if (WIFEXITED(st)) { fprintf(stderr, "setup failed\n"); return 2; }
+        else if (WIFEXITED(st)) { fprintf(stderr, "trial %d: exit %d (setup, or nothing relocated)\n", t, WEXITSTATUS(st)); return 2; }
         else { died++; fprintf(stderr, "trial %d: signal %d\n", t, WTERMSIG(st)); }
     }
     printf("threadtest: %d/%d clean, %d wrong-result, %d died (%d threads x %d sites)\n",
