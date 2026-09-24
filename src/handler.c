@@ -543,6 +543,27 @@ static int g_cpuid_count = 0;
 /* per-feature overrides applied to cpuid results: result = (real | set) & ~clr */
 static uint32_t g_l1ecx_set=0, g_l1ecx_clr=0, g_l7ebx_set=0, g_l7ebx_clr=0;
 
+/*
+ * avxemu's own cpuid, kept out of __text on purpose. avxemu_patch_cpuid turns
+ * every cpuid in the main image's __text into ud2, and when avxemu is linked
+ * INTO the main image (the test programs are) that includes ours: the handler
+ * would fault on the very cpuid it emulates cpuid with, forever, and feature
+ * detection would see the AVX2 we advertise instead of the CPU it runs on.
+ * A section of its own in __TEXT is executable and invisible to that scan.
+ */
+__attribute__((noinline, section("__TEXT,__avxemu_raw,regular,pure_instructions")))
+void avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+/* __get_cpuid's contract: 0 if `leaf` is past the CPU's maximum. */
+int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
+    uint32_t m[4];
+    avxemu_cpuid_raw(leaf & 0x80000000u, 0, m);
+    if (m[0] < leaf) return 0;
+    avxemu_cpuid_raw(leaf, sub, r);
+    return 1;
+}
+
 static void avxemu_patch_cpuid(void){
     const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
     if (!mh || mh->magic != MH_MAGIC_64) return;
@@ -562,8 +583,9 @@ static void avxemu_patch_cpuid(void){
     if (!text_addr) return;
     uint8_t *text=(uint8_t *)(text_addr+slide), *end=text+text_size;
     uintptr_t lo=(uintptr_t)text & ~(uintptr_t)0xfff, hi=((uintptr_t)text+text_size+0xfff)&~(uintptr_t)0xfff;
+    /* stays executable while writable: see avxemu_patch_lzcnt */
     if (vm_protect(mach_task_self(),(vm_address_t)lo,(vm_size_t)(hi-lo),FALSE,
-                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_COPY)!=KERN_SUCCESS){ emit("avxemu: cpuid vm_protect failed\n"); return; }
+                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE|VM_PROT_COPY)!=KERN_SUCCESS){ emit("avxemu: cpuid vm_protect failed\n"); return; }
     uint8_t *p=text;
     while (p<end){
         int zk,off; int len=x86_len(p,end,&zk,&off);
@@ -610,7 +632,8 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
             if (v==rip0){found=1;break;} else if (v<rip0) lo=mid+1; else hi=mid-1; }
         if (found){
             uint32_t leaf=(uint32_t)ss0->__rax, sub=(uint32_t)ss0->__rcx, a,b,c,d;
-            __asm__ volatile("cpuid":"=a"(a),"=b"(b),"=c"(c),"=d"(d):"a"(leaf),"c"(sub));
+            uint32_t r[4]; avxemu_cpuid_raw(leaf, sub, r);
+            a = r[0]; b = r[1]; c = r[2]; d = r[3];
             if (leaf==1)                c = (c | g_l1ecx_set) & ~g_l1ecx_clr;
             else if (leaf==7 && sub==0) b = (b | g_l7ebx_set) & ~g_l7ebx_clr;
             ss0->__rax=a; ss0->__rbx=b; ss0->__rcx=c; ss0->__rdx=d; ss0->__rip+=2;

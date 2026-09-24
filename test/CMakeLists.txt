@@ -21,22 +21,21 @@ function(avxemu_test_exe name)
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
 endfunction()
 
-set(PATCHES_OWN_TEXT "at this commit avxemu's load-time constructor patches cpuid, on any CPU, in the __text it is running from -- the core is linked into this test program -- and faults; the follow-up fix 'keep __text executable while patching it at load, and keep our own cpuid out of it' (release 2) fixes it")
-set(STUBS_IN_TEXT "${PATCHES_OWN_TEXT}; then its load-time passes rewrite this test's own stubs in __text, which the follow-up fix 'keep test and self-test stubs out of __text, ...' (release 2) fixes")
+set(STUBS_IN_TEXT "on a CPU without AVX2, avxemu's load-time passes rewrite this test's own stubs in __text before main -- the core is linked into this test program -- and the test dies or decodes the wrong bytes; on a CPU with AVX2 the passes leave them alone and it passes; the follow-up fix 'keep test and self-test stubs out of __text, ...' (release 2) fixes it")
 
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
 avxemu_test_exe(inject SOURCES inject.c stubs.s LINK avxemu_core avxemu_asm)
-add_test(NAME inject COMMAND ${AVXEMU_RUN} --fails-when always --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:inject>)
+add_test(NAME inject COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:inject>)
 
 avxemu_test_exe(memtest SOURCES memtest.c memtest.s LINK avxemu_core avxemu_asm)
-add_test(NAME memtest COMMAND ${AVXEMU_RUN} --fails-when always --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:memtest>)
+add_test(NAME memtest COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:memtest>)
 
 avxemu_test_exe(tramptest SOURCES tramptest.c tramp_harness.s LINK avxemu_core avxemu_asm)
-add_test(NAME tramptest COMMAND ${AVXEMU_RUN} --fails-when always --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:tramptest>)
+add_test(NAME tramptest COMMAND ${AVXEMU_RUN} --fails-when no-avx2 --because "${STUBS_IN_TEXT}" -- $<TARGET_FILE:tramptest>)
 
 avxemu_test_exe(overread SOURCES overread.c LINK avxemu_core avxemu_asm)
-add_test(NAME overread COMMAND ${AVXEMU_RUN} --fails-when always --because "${PATCHES_OWN_TEXT}" -- $<TARGET_FILE:overread>)
+add_test(NAME overread COMMAND $<TARGET_FILE:overread>)
 
 avxemu_test_exe(reloctest SOURCES reloctest.c LINK avxemu_core avxemu_asm)
 add_test(NAME reloctest COMMAND $<TARGET_FILE:reloctest>)
@@ -110,12 +109,12 @@ avxemu_oracle(oracle DRIVER oracle.c HW oracle_hw.c LINK t_exec)
 avxemu_objects(t_bmi "${PROJECT_SOURCE_DIR}/src/exec_bmi.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_oracle(bmi_oracle DRIVER bmi_oracle.c HW bmi_hw.c LINK t_bmi)
 
-# Built, so their drivers stay compiled and inside vex-leak-replay, but not registered: at this
-# source both fault at load on every CPU (STUBS_IN_TEXT), so neither can record a reference, and
-# a test with no reference and no way to run can never fail. Release 2 registers them, together
-# with their references, once the maintainer's follow-up fixes to load-time patching land.
-avxemu_oracle(patchtest UNREGISTERED DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.s
-              LINK avxemu_core avxemu_asm)
+avxemu_oracle(patchtest DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.s LINK avxemu_core avxemu_asm)
+
+# Built, so its driver stays compiled and inside vex-leak-replay, but not registered: at this
+# source it still dies on a CPU without AVX2 (STUBS_IN_TEXT), so it can neither replay
+# there nor prove anything by recording. The follow-up fix 'keep test and self-test stubs out of
+# __text, ...' (release 2) registers it, with its reference.
 avxemu_oracle(bmimem UNREGISTERED DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
 
 avxemu_objects(t_decode "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/names.c")

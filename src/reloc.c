@@ -32,6 +32,8 @@
 #include <mach/mach.h>
 #include <cpuid.h>
 
+extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
+
 /* Must match tramp.c / tramp.s exactly (the run_record is appended after the
  * tt thunk code; the dispatcher walks insns[i].dec / .addr). */
 typedef struct { uint64_t addr; decoded dec; } tramp_insn;
@@ -57,13 +59,12 @@ static void detect_features(void) {
     if (getenv("AVXEMU_FORCETRAMP")) {     /* dev: treat everything emulatable as faulting */
         g_lack_avx2 = g_lack_fma = g_lack_bmi = g_lack_f16c = 1; g_det = 1; return;
     }
-    unsigned a, b, c, d;
-    if (__get_cpuid(1, &a, &b, &c, &d)) { g_lack_fma = !(c & (1u<<12)); g_lack_f16c = !(c & (1u<<29)); }
-    unsigned a7 = 0, b7 = 0, c7 = 0, d7 = 0;
-    __cpuid_count(7, 0, a7, b7, c7, d7);
-    g_lack_avx2 = !(b7 & (1u<<5));
-    int bmi1 = (b7 & (1u<<3)) != 0, bmi2 = (b7 & (1u<<8)) != 0;
-    unsigned a8, b8, c8, d8; int lz = __get_cpuid(0x80000001u, &a8, &b8, &c8, &d8) && (c8 & (1u<<5));
+    uint32_t r1[4], r7[4] = {0}, r8[4];
+    if (avxemu_get_cpuid(1, 0, r1)) { g_lack_fma = !(r1[2] & (1u<<12)); g_lack_f16c = !(r1[2] & (1u<<29)); }
+    (void)avxemu_get_cpuid(7, 0, r7);
+    g_lack_avx2 = !(r7[1] & (1u<<5));
+    int bmi1 = (r7[1] & (1u<<3)) != 0, bmi2 = (r7[1] & (1u<<8)) != 0;
+    int lz = avxemu_get_cpuid(0x80000001u, 0, r8) && (r8[2] & (1u<<5));
     g_lack_bmi = !(bmi1 && bmi2 && lz);
     g_det = 1;
 }

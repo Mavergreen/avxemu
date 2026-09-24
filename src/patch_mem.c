@@ -22,12 +22,14 @@
 #include <mach-o/loader.h>
 #include <cpuid.h>
 
+extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
+
 static void emit(const char *s){ (void)write(2, s, strlen(s)); }
 
 static int cpu_has_lzcnt(void) {
-    unsigned a, b, c, d;
-    if (!__get_cpuid(0x80000001u, &a, &b, &c, &d)) return 0;
-    return (c >> 5) & 1;                          /* ECX[5] = LZCNT/ABM */
+    uint32_t r[4];
+    if (!avxemu_get_cpuid(0x80000001u, 0, r)) return 0;
+    return (r[2] >> 5) & 1;                       /* ECX[5] = LZCNT/ABM */
 }
 
 static uint64_t uleb(const uint8_t **p, const uint8_t *e) {
@@ -74,12 +76,15 @@ long avxemu_patch_lzcnt(void) {
      * r-x (write is forbidden even as a ceiling), so plain mprotect(PROT_WRITE)
      * is rejected with EACCES. VM_PROT_COPY forces a private copy-on-write of
      * the region and grants write to that copy, the standard way to patch code
-     * on macOS. We then restore r-x; execution runs from the patched copy. */
+     * on macOS. We then restore r-x; execution runs from the patched copy.
+     * EXECUTE stays on throughout: this is the whole __text, and whatever is
+     * running from it meanwhile (other threads, or avxemu itself when it is
+     * linked into the main image) must not fault. */
     mach_port_t task = mach_task_self();
     uintptr_t lo = (uintptr_t)text & ~(uintptr_t)0xfff;
     uintptr_t hi = ((uintptr_t)text + text_size + 0xfff) & ~(uintptr_t)0xfff;
     kern_return_t kr = vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         emit("avxemu: vm_protect(__text, COPY) failed — lzcnt/tzcnt NOT patched\n");
         return 0;

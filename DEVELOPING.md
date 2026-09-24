@@ -35,17 +35,16 @@ emulator is checked against silicon on CPUs that lack the instructions.
 
 **Re-recording a reference:** see INGREDIENTS.md, "Releasing".
 
-## Known failures at release 1
+## Known failures
 
-At this source, a test program that links the emulator's core into itself faults at load on
-every CPU. The load-time constructor patches the `__text` it is running from. Release 2 brings
-the fixes.
+On a CPU without AVX2, a test program that links the emulator's core into itself has its own
+stubs rewritten at load: avxemu's load-time passes patch the `__text` they live in. A later
+fix in release 2 moves them out of `__text`.
 
-- `inject`, `memtest`, `tramptest` and `overread` are marked `--fails-when always`.
+- `inject`, `memtest` and `tramptest` are marked `--fails-when no-avx2`.
 - `overread-fault` is marked `--fails-when rosetta`. Under Rosetta the fault handler does not
   repair the straddling read. Cause not yet diagnosed.
-- The `patchtest` and `bmimem` oracles are built, but not registered as tests, and have no
-  references.
+- The `bmimem` oracle is built, but not registered as a test, and has no reference.
 
 A marked test that starts passing fails with `UNEXPECTED PASS`. Remove its mark.
 
