@@ -10,6 +10,7 @@
 #include <string.h>
 
 extern int avxemu_test_ud2;
+extern void avxemu_force_install(void);
 extern void m_disp8(const void*, void*, void*);
 extern void m_disp32(const void*, void*, void*);
 extern void m_sib(const void*, void*, void*, uint64_t);
@@ -32,6 +33,7 @@ static void chk_add(const char*nm,const uint8_t*src1,const uint8_t*mem,const uin
 
 int main(void){
     setvbuf(stdout,0,_IONBF,0);
+    avxemu_force_install();   /* the handler, even where avxemu would stay inert */
     avxemu_test_ud2=1;
     void*bufv; if(posix_memalign(&bufv,32,2048))return 2; uint8_t*buf=bufv;
     uint8_t src1[32],out[32],mem[32];

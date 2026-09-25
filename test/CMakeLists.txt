@@ -52,8 +52,18 @@ add_test(NAME selftest COMMAND ${AVXEMU_RUN} --needs mavericks --
 
 avxemu_test_exe(linkhook FLAGS -O0 SOURCES linkhook.c)
 target_link_libraries(linkhook PRIVATE avxemu)
-add_test(NAME linkhook COMMAND ${AVXEMU_RUN} --needs mavericks -- $<TARGET_FILE:linkhook>)
-add_test(NAME linkhook-no-rebind COMMAND ${AVXEMU_RUN} --needs mavericks -- env AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
+# AVXEMU_FORCEPATCH keeps avxemu installed on a CPU that has everything, where it would
+# otherwise stay inert (inerttest) and there would be no rebind to test.
+add_test(NAME linkhook COMMAND ${AVXEMU_RUN} --needs mavericks -- env AVXEMU_FORCEPATCH=1 $<TARGET_FILE:linkhook>)
+add_test(NAME linkhook-no-rebind COMMAND ${AVXEMU_RUN} --needs mavericks --
+  env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
+
+# Linked on a CPU that has everything, avxemu stays inert. The plain run checks the real early
+# return on such a CPU, and on one without is the negative control: avxemu must be installed.
+avxemu_test_exe(inerttest FLAGS -O0 SOURCES inerttest.c)
+target_link_libraries(inerttest PRIVATE avxemu)
+add_test(NAME inerttest COMMAND $<TARGET_FILE:inerttest>)
+add_test(NAME inerttest-assume-capable COMMAND env AVXEMU_ASSUME_CAPABLE=1 $<TARGET_FILE:inerttest>)
 
 # Linked against the dylib, like linkhook: the production configuration. N threads race each
 # site's runtime relocation. It skips itself on a CPU with AVX2, where the loop never faults.
@@ -68,7 +78,7 @@ avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
 set_tests_properties(run-wrapper inject memtest tramptest overread reloctest nativetest zcnt16
-                     threadtest overread-fault guard-page
+                     inerttest inerttest-assume-capable threadtest overread-fault guard-page
   PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 set_tests_properties(selftest linkhook linkhook-no-rebind
   PROPERTIES LABELS mavericks SKIP_RETURN_CODE 77)

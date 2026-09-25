@@ -942,9 +942,37 @@ static void avxemu_rebind_image(const struct mach_header *mhp, intptr_t slide) {
     rebind_sym_in_image(mh, slide, "_signal",    (const void *)avxemu_signal);
 }
 
+/*
+ * Does this CPU already have everything we emulate? Then there is nothing for us
+ * to do, and doing it anyway is not free: the cpuid pass alone decodes the whole
+ * of __text (~360 ms for Claude Code) because we advertise AVX2 regardless, every
+ * cpuid then traps, and we take ownership of SIGILL. Returning early makes a
+ * linked avxemu inert on such a CPU -- a loaded dylib and nothing else.
+ * Asked of the raw CPU. The force/diagnostic knobs, which exist to exercise us on
+ * a capable host, keep us installed. AVXEMU_ASSUME_CAPABLE is the test hook that
+ * lets a CPU without these features check the early return.
+ */
+static int g_force_install;   /* avxemu_force_install: the test programs that drive the handler */
+static int cpu_has_everything(void) {
+    if (g_force_install) return 0;
+    if (getenv("AVXEMU_FORCEPATCH") || getenv("AVXEMU_FORCETRAMP") || getenv("AVXEMU_SELFTEST") ||
+        getenv("AVXEMU_FAKE_CPUID") || getenv("AVXEMU_CPUID_SET") || getenv("AVXEMU_CPUID_CLR"))
+        return 0;
+    if (getenv("AVXEMU_ASSUME_CAPABLE")) return 1;
+    uint32_t r1[4], r7[4] = {0}, r8[4];
+    if (!avxemu_get_cpuid(1, 0, r1)) return 0;
+    (void)avxemu_get_cpuid(7, 0, r7);
+    if (!avxemu_get_cpuid(0x80000001u, 0, r8)) return 0;
+    const uint32_t l1  = (1u<<12) | (1u<<22) | (1u<<29);   /* FMA, MOVBE, F16C */
+    const uint32_t l7  = (1u<<3)  | (1u<<5)  | (1u<<8);    /* BMI1, AVX2, BMI2 */
+    const uint32_t l81 = (1u<<5);                           /* LZCNT */
+    return (r1[2] & l1) == l1 && (r7[1] & l7) == l7 && (r8[2] & l81) == l81;
+}
+
 __attribute__((constructor))
 static void avxemu_install(void) {
     if (getenv("AVXEMU_DISABLE")) return;     /* opt-out escape hatch */
+    if (cpu_has_everything()) return;         /* nothing to emulate: stay inert */
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
     sa.sa_sigaction = on_sigill;
@@ -1014,5 +1042,12 @@ static void avxemu_install(void) {
     if (getenv("AVXEMU_SELFTEST")) avxemu_selftest();
 }
 
-/* Exposed for the fault-injection test harness. */
-void avxemu_force_install(void) { avxemu_install(); }
+/* Exposed for the test programs that drive the SIGILL handler themselves (fault injection, the
+ * patched-lzcnt and BMI-memory oracles, the fuzzer). They need it installed on any CPU, including
+ * one that has everything, where the constructor stays inert; where the constructor did install
+ * it, once is enough. */
+void avxemu_force_install(void) {
+    if (g_owned_sigill) return;
+    g_force_install = 1;
+    avxemu_install();
+}

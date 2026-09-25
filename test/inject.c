@@ -16,6 +16,7 @@
 extern uint64_t dec_labels[];
 extern uint64_t dec_n;
 extern int avxemu_test_ud2;
+extern void avxemu_force_install(void);
 
 extern void     e2e_vpaddd(const void*, const void*, void*);
 extern void     e2e_vpaddd_mem(const void*, const void*, void*);
@@ -91,6 +92,7 @@ static int test_e2e(void){
 
 int main(void){
     setvbuf(stdout, NULL, _IONBF, 0);
+    avxemu_force_install();  /* the handler, even where avxemu would stay inert */
     avxemu_test_ud2 = 1;     /* injected ud2 precedes each target instruction */
     printf("== decoder (real encodings) ==\n");
     int f1=test_decoder();

@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 
 extern int avxemu_test_ud2;
+extern void avxemu_force_install(void);
 extern const unsigned char fuzz_start[], fuzz_slot[], fuzz_epilogue[], fuzz_end[];
 
 #define SLOT 24
@@ -70,6 +71,7 @@ int main(int argc,char**argv){
     seen=calloc(HN,sizeof*seen);
     void *st; if(posix_memalign(&st,32,1024)) return 2;
     uint8_t out_nat[512];
+    avxemu_force_install();   /* the handler: on the AVX2 CPU this runs on, avxemu stays inert */
     avxemu_test_ud2=1;
 
     long tested=0,distinct=0,mism=0; int shown=0;
