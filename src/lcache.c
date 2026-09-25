@@ -49,6 +49,7 @@
 extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
 
 #include "lcache.h"
+#include "image.h"
 
 int avxemu_lc_mode = LC_OFF;
 
@@ -111,15 +112,15 @@ static int settings_that_do_not_matter(const char *e) {
 static int make_key(uint64_t text_vmaddr, uint64_t text_size) {
     memset(&g_key, 0, sizeof g_key);
     const struct mach_header_64 *self = self_image();
-    const struct mach_header_64 *exe = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!self || !exe || exe->magic != MH_MAGIC_64) return 0;
+    const char *name = 0;
+    const struct mach_header_64 *exe = avxemu_main_image(0, &name);
+    if (!self || !exe) return 0;
     if (!image_uuid(self, g_key.self_uuid)) return 0;
     /* The program's own UUID is a bonus, not a requirement: the Mavericks
      * wrapper's change_dylib -strip-lc removes LC_UUID from Claude Code to make
      * header room. The file's identity below (device, inode, size, mtime to the
      * nanosecond) is what pins the program; replay re-checks every site anyway. */
     (void)image_uuid(exe, g_key.exe_uuid);
-    const char *name = _dyld_get_image_name(0);
     struct stat st;
     if (!name || stat(name, &st) != 0) return 0;
     g_key.exe_dev = (uint64_t)st.st_dev;   g_key.exe_ino = (uint64_t)st.st_ino;
@@ -190,8 +191,8 @@ static int load(void) {
 
 /* The main image's __text, unslid: part of the key. */
 static int main_text(uint64_t *vmaddr, uint64_t *size) {
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!mh || mh->magic != MH_MAGIC_64) return 0;
+    const struct mach_header_64 *mh = avxemu_main_image(0, 0);
+    if (!mh) return 0;
     const struct load_command *lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd == LC_SEGMENT_64) {

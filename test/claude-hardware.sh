@@ -1,12 +1,12 @@
 #!/bin/sh
-# platform: macOS-only -- otool reads the binary; DYLD_INSERT_LIBRARIES loads avxemu into it
-#   usage: claude-hardware.sh CPUPROBE FUZZ LIBAVXEMU WORKDIR
-#          Runs every register-only vector instruction in $CLAUDE_BIN natively and emulated, and
-#          compares a forced-trampolined `--help` with the native one. Both need real AVX2
-#          silicon: exit 77 without CLAUDE_BIN, without AVX2, or under Rosetta.
+# platform: macOS-only -- otool reads the binary's sections and disassembly
+#   usage: claude-hardware.sh CPUPROBE FUZZ WORKDIR
+#          Runs every register-only vector instruction in $CLAUDE_BIN natively and emulated. That
+#          needs real AVX2 silicon: exit 77 without CLAUDE_BIN, without AVX2, or under Rosetta.
+#          claude-trampoline.sh compares a forced-trampolined `--help` with the native one.
 set -eu
 [ -n "${CLAUDE_BIN:-}" ] || { echo "SKIP: set CLAUDE_BIN to a Claude Code binary"; exit 77; }
-probe=${1:?usage}; fuzz=${2:?usage}; lib=${3:?usage}; out=${4:?usage}
+probe=${1:?usage}; fuzz=${2:?usage}; out=${3:?usage}
 feats=$("$probe")
 case " $feats " in *" translated "*) echo "SKIP: translated, not real silicon"; exit 77 ;; esac
 case " $feats " in *" avx2 "*) ;; *) echo "SKIP: this CPU has no AVX2"; exit 77 ;; esac
@@ -25,11 +25,3 @@ awk -F'\t' '
 grep -E "distinct|runs|mismatch" "$out/fuzz.txt"
 distinct=$(awk -F': ' '/^distinct reg-only insns:/{print $2}' "$out/fuzz.txt")
 [ -n "$distinct" ] && [ "$distinct" -gt 0 ] 2>/dev/null || { echo "fuzz found zero distinct register-only instructions -- the scan is blind"; exit 1; }
-"$CLAUDE_BIN" --help > "$out/nat.txt" 2>/dev/null || true
-env AVXEMU_FORCETRAMP=1 DYLD_INSERT_LIBRARIES="$lib" "$CLAUDE_BIN" --help > "$out/tramp.txt" 2>"$out/tramp.err" || true
-[ -s "$out/nat.txt" ] || { echo "native --help printed nothing"; exit 1; }
-if cmp -s "$out/nat.txt" "$out/tramp.txt"; then
-  echo "forced-trampolined --help IDENTICAL to native ($(wc -c < "$out/nat.txt") bytes)"
-else
-  echo "forced-trampolined --help DIFFERS from native"; exit 1
-fi

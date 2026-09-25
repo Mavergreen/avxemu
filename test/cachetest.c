@@ -37,6 +37,8 @@
 #include <sys/wait.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#include <crt_externs.h>
 #include <mach-o/loader.h>
 #include "lcache.h"
 
@@ -52,7 +54,7 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 
 static int child(void) {
     unsigned long sz;
-    const uint8_t *text = getsectiondata((const struct mach_header_64 *)_dyld_get_image_header(0),
+    const uint8_t *text = getsectiondata((const struct mach_header_64 *)_NSGetMachExecuteHeader(),
                                          "__TEXT", "__text", &sz);
     uint32_t v[8] __attribute__((aligned(32))) = {1, 2, 3, 4, 5, 6, 7, 8};
     ct_quadruple(v);

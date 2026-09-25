@@ -36,6 +36,7 @@
 #include "lde.h"
 #include "regfile.h"
 #include "lcache.h"
+#include "image.h"
 
 static struct sigaction g_old;
 static int g_owned_sigill = 0;          /* our SIGILL handler is installed */
@@ -566,10 +567,21 @@ int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
     return 1;
 }
 
+const struct mach_header_64 *avxemu_main_image(intptr_t *slide, const char **name) {
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
+        if (!mh || mh->magic != MH_MAGIC_64 || mh->filetype != MH_EXECUTE) continue;
+        if (slide) *slide = _dyld_get_image_vmaddr_slide(i);
+        if (name)  *name  = _dyld_get_image_name(i);
+        return mh;
+    }
+    return 0;
+}
+
 static void avxemu_patch_cpuid(void){
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!mh || mh->magic != MH_MAGIC_64) return;
-    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    intptr_t slide;
+    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
+    if (!mh) return;
     uint64_t text_addr=0, text_size=0;
     const struct load_command *lc = (const struct load_command *)(mh + 1);
     for (uint32_t i=0;i<mh->ncmds;i++){
@@ -947,6 +959,11 @@ static int rebind_sym_in_image(const struct mach_header_64 *mh, intptr_t slide,
     return n;
 }
 
+/* Pointers the rebind actually rewrote. Test hook (linkhook): with the rebind
+ * off it must stay 0, which tells "dyld interposed us itself" (it does, for
+ * linked images, on macOS newer than 10.9) apart from "the rebind ran anyway". */
+int avxemu_rebind_count;
+
 static void avxemu_rebind_image(const struct mach_header *mhp, intptr_t slide) {
     const struct mach_header_64 *mh = (const struct mach_header_64 *)mhp;
     if (!mh || mh->magic != MH_MAGIC_64) return;
@@ -958,8 +975,8 @@ static void avxemu_rebind_image(const struct mach_header *mhp, intptr_t slide) {
         if (nm && (!strncmp(nm, "/usr/lib/", 9) || !strncmp(nm, "/System/", 8))) return;
         break;
     }
-    rebind_sym_in_image(mh, slide, "_sigaction", (const void *)avxemu_sigaction);
-    rebind_sym_in_image(mh, slide, "_signal",    (const void *)avxemu_signal);
+    avxemu_rebind_count += rebind_sym_in_image(mh, slide, "_sigaction", (const void *)avxemu_sigaction);
+    avxemu_rebind_count += rebind_sym_in_image(mh, slide, "_signal",    (const void *)avxemu_signal);
 }
 
 /*

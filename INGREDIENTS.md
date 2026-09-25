@@ -55,7 +55,8 @@ were done.
     shipyard-cmake --preset native && shipyard-cmake --build --preset native
     CLAUDE_BIN=<a Claude Code binary> shipyard-ctest --preset native
 
-Everything passes or skips; this is the only place the `mavericks` label (10.9's dyld) runs.
+Everything passes or skips; this is the only place the tests run on 10.9's own dyld, on a CPU
+that needs the emulator.
 
 **On an Intel Mac with AVX2, FMA and BMI:**
 

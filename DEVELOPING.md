@@ -23,7 +23,6 @@ Each test carries a label for what it needs. A test whose need is unmet skips.
 | `hermetic` | only the emulator, any x86_64 | everywhere, CI included (under Rosetta) |
 | `replay` | only the emulator, checked against recordings from AVX2 silicon | everywhere, CI included |
 | `hardware` | a real AVX2/FMA/BMI CPU, not Rosetta | an Intel Mac with AVX2 |
-| `mavericks` | Mac OS X 10.9's dyld | the 10.9 machine |
 | `claude-binary` | `CLAUDE_BIN=<a Claude Code binary>` | wherever you set it |
 
 To run one label: `shipyard-ctest --preset native -L replay`.

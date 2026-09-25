@@ -53,16 +53,20 @@ avxemu_objects(t_zcnt "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR
 avxemu_test_exe(zcnt16 SOURCES zcnt16.c LINK t_zcnt)
 add_test(NAME zcnt16 COMMAND $<TARGET_FILE:zcnt16>)
 
-add_test(NAME selftest COMMAND ${AVXEMU_RUN} --needs mavericks --
-  env AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu> /usr/bin/true)
+# Inserted into a program of our own, not /usr/bin/true: SIP strips DYLD_INSERT_LIBRARIES from
+# system binaries on macOS newer than 10.9. The verdict is the self-test's own summary line, so a
+# run where avxemu never loaded cannot pass.
+avxemu_test_exe(selftest_host FLAGS -O0 SOURCES selftest_host.c)
+add_test(NAME selftest COMMAND env AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu>
+  $<TARGET_FILE:selftest_host>)
+set_tests_properties(selftest PROPERTIES PASS_REGULAR_EXPRESSION "avxemu selftest: all shapes OK")
 
 avxemu_test_exe(linkhook FLAGS -O0 SOURCES linkhook.c)
 target_link_libraries(linkhook PRIVATE avxemu)
 # AVXEMU_FORCEPATCH keeps avxemu installed on a CPU that has everything, where it would
 # otherwise stay inert (inerttest) and there would be no rebind to test.
-add_test(NAME linkhook COMMAND ${AVXEMU_RUN} --needs mavericks -- env AVXEMU_FORCEPATCH=1 $<TARGET_FILE:linkhook>)
-add_test(NAME linkhook-no-rebind COMMAND ${AVXEMU_RUN} --needs mavericks --
-  env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
+add_test(NAME linkhook COMMAND env AVXEMU_FORCEPATCH=1 $<TARGET_FILE:linkhook>)
+add_test(NAME linkhook-no-rebind COMMAND env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
 
 # Linked on a CPU that has everything, avxemu stays inert. The plain run checks the real early
 # return on such a CPU, and on one without is the negative control: avxemu must be installed.
@@ -84,10 +88,9 @@ avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
 set_tests_properties(run-wrapper inject memtest tramptest overread reloctest nativetest cachetest zcnt16
-                     inerttest inerttest-assume-capable threadtest overread-fault guard-page
+                     selftest linkhook linkhook-no-rebind inerttest inerttest-assume-capable
+                     threadtest overread-fault guard-page
   PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
-set_tests_properties(selftest linkhook linkhook-no-rebind
-  PROPERTIES LABELS mavericks SKIP_RETURN_CODE 77)
 
 avxemu_objects(t_refdigest refdigest.c cpu.c)
 avxemu_test_exe(refdigest_test SOURCES refdigest_test.c LINK t_refdigest)
@@ -139,9 +142,11 @@ avxemu_test_exe(fuzz SOURCES fuzz.c fuzz.s LINK avxemu_core avxemu_asm)
 add_test(NAME claude-decode COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-decode.sh"
   $<TARGET_FILE:bintest> $<TARGET_FILE:patchdiff> $<TARGET_FILE:zdecode> "${CMAKE_BINARY_DIR}/claude-decode")
 add_test(NAME claude-hardware COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-hardware.sh"
-  $<TARGET_FILE:cpuprobe> $<TARGET_FILE:fuzz> $<TARGET_FILE:avxemu> "${CMAKE_BINARY_DIR}/claude-hardware")
+  $<TARGET_FILE:cpuprobe> $<TARGET_FILE:fuzz> "${CMAKE_BINARY_DIR}/claude-hardware")
+add_test(NAME claude-trampoline COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-trampoline.sh"
+  $<TARGET_FILE:cpuprobe> $<TARGET_FILE:avxemu> "${CMAKE_BINARY_DIR}/claude-trampoline")
 set_tests_properties(claude-decode PROPERTIES LABELS claude-binary SKIP_RETURN_CODE 77)
-set_tests_properties(claude-hardware PROPERTIES LABELS "claude-binary;hardware" SKIP_RETURN_CODE 77)
+set_tests_properties(claude-hardware claude-trampoline PROPERTIES LABELS "claude-binary;hardware" SKIP_RETURN_CODE 77)
 
 set(_replay_objs $<TARGET_OBJECTS:t_refdigest>)
 foreach(p IN LISTS AVXEMU_REPLAY_PROGRAMS)

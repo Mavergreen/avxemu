@@ -11,6 +11,7 @@
 #include "vexops.h"
 #include "lde.h"
 #include "lcache.h"
+#include "image.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -550,7 +551,7 @@ static int nstats_enabled(void){
     if (g_nstats < 0){ const char *e = getenv("AVXEMU_NATIVE_STATS"); g_nstats = (e && e[0] && e[0] != '0') ? 1 : 0; }
     return g_nstats;
 }
-static uint64_t g_ns_accept, g_ns_decline, g_ns_single, g_ns_multi;
+static uint64_t g_ns_accept, g_ns_decline, g_ns_single, g_ns_multi, g_ns_placed;
 static uint64_t g_ns_block_op[VEX_OP_COUNT];
 static void nstats_tally(const tramp_insn *ri, int rn){
     if (rn == 1) g_ns_single++; else g_ns_multi++;
@@ -803,6 +804,7 @@ static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_of
             int64_t rel = (int64_t)((uint8_t *)thunk - (site + 5));
             if (rel >= INT32_MIN && rel <= INT32_MAX) {
                 site[0] = 0xE9; int32_t r32 = (int32_t)rel; memcpy(site + 1, &r32, 4);
+                g_ns_placed++;
                 return 1;
             }
         }
@@ -1180,9 +1182,9 @@ long avxemu_install_trampolines(void) {
     /* per-thread side-stack key, created here (single-threaded) before any thunk runs */
     if (!g_side_key_ok && pthread_key_create(&g_side_key, 0) == 0) g_side_key_ok = 1;
 
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!mh || mh->magic != MH_MAGIC_64) return 0;
-    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    intptr_t slide;
+    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
+    if (!mh) return 0;
 
     uint64_t tseg_vm = 0, tseg_sz = 0, text_addr = 0, text_size = 0, le_vm = 0, le_off = 0;
     uint32_t fs_off = 0, fs_size = 0;
@@ -1277,6 +1279,9 @@ long avxemu_install_trampolines(void) {
         emit("native-decline runs\t"); as_u64(2, g_ns_decline); emit("\n");
         emit("single-insn runs\t"); as_u64(2, g_ns_single); emit("\n");
         emit("multi-insn runs\t"); as_u64(2, g_ns_multi); emit("\n");
+        /* the runs above were built; this many jmps actually landed (a pool out
+         * of rel32 reach of __text, as on macOS 15, places none) */
+        emit("placed runs\t"); as_u64(2, g_ns_placed); emit("\n");
         int idx[VEX_OP_COUNT]; int m = 0;
         for (int i = 0; i < VEX_OP_COUNT; i++) if (g_ns_block_op[i]) idx[m++] = i;
         for (int i = 0; i < m; i++){ int best = i;

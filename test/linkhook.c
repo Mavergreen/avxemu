@@ -22,6 +22,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <dlfcn.h>
+
+extern int avxemu_rebind_count;
 
 static void my_handler(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)si; (void)uc;
@@ -57,6 +60,20 @@ int main(void) {
         return 1;
     }
     if (!expect_kept && !stolen) {
+        /* Newer dyld honours __DATA,__interpose for linked images too, so there
+         * is nothing for the rebind to do and nothing for this control to show.
+         * That is the case iff our own sigaction resolves into avxemu although
+         * the rebind rewrote nothing. Anything else is the control failing.
+         * Asked of dyld: comparing &sigaction with &avxemu_sigaction in C is
+         * folded to false at compile time (distinct functions, distinct
+         * addresses), even at -O0. */
+        Dl_info di;
+        if (avxemu_rebind_count == 0 && dladdr((void *)&sigaction, &di) && di.dli_sname &&
+            !strcmp(di.dli_sname, "avxemu_sigaction")) {
+            printf("PASS linkhook (%-18s): not applicable -- this dyld interposes linked "
+                   "images itself, so avxemu keeps SIGILL without the rebind\n", mode);
+            return 0;
+        }
         printf("FAIL linkhook (%s): rebind was disabled, yet the app's handler "
                "still did not take effect — the control case is broken\n", mode);
         return 1;

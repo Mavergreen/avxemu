@@ -24,6 +24,7 @@
 
 extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
 #include "lcache.h"
+#include "image.h"
 
 static void emit(const char *s){ (void)write(2, s, strlen(s)); }
 
@@ -46,9 +47,9 @@ long avxemu_patch_lzcnt(void) {
      * patched site then traps and is emulated, proving the whole chain). */
     if (cpu_has_lzcnt() && !getenv("AVXEMU_FORCEPATCH")) return 0;
 
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(0);
-    if (!mh || mh->magic != MH_MAGIC_64) return 0;
-    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    intptr_t slide;
+    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
+    if (!mh) return 0;
 
     uint64_t textseg_vm = 0, textseg_sz = 0, text_addr = 0, text_size = 0, le_vm = 0, le_off = 0;
     uint32_t fs_off = 0, fs_size = 0;
