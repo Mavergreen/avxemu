@@ -35,6 +35,7 @@
 #include "softfma.h"
 #include "lde.h"
 #include "regfile.h"
+#include "lcache.h"
 
 static struct sigaction g_old;
 static int g_owned_sigill = 0;          /* our SIGILL handler is installed */
@@ -80,6 +81,7 @@ static void reloc_unlock(const sigset_t *saved) {
 }
 
 extern int avxemu_reloc_prepare(uint8_t *site, uint8_t **resume);
+
 extern int avxemu_reloc_commit(uint8_t *site, uint8_t *resume, volatile uint8_t *patched);
 
 /* AVXEMU_FAULTHIST=1 diagnostic: periodically dump the g_hot RIP->count table
@@ -585,7 +587,24 @@ static void avxemu_patch_cpuid(void){
     uintptr_t lo=(uintptr_t)text & ~(uintptr_t)0xfff, hi=((uintptr_t)text+text_size+0xfff)&~(uintptr_t)0xfff;
     /* stays executable while writable: see avxemu_patch_lzcnt */
     if (vm_protect(mach_task_self(),(vm_address_t)lo,(vm_size_t)(hi-lo),FALSE,
-                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE|VM_PROT_COPY)!=KERN_SUCCESS){ emit("avxemu: cpuid vm_protect failed\n"); return; }
+                   VM_PROT_READ|VM_PROT_WRITE|VM_PROT_EXECUTE|VM_PROT_COPY)!=KERN_SUCCESS){ emit("avxemu: cpuid vm_protect failed\n"); avxemu_lc_rec_fail(); return; }
+    if (avxemu_lc_mode == LC_REPLAY) {             /* lcache.c: the sites, without the scan */
+        const uint32_t *offs; uint32_t n = avxemu_lc_cpuid(&offs);
+        int ok = 1;                                    /* every site checked before any is written */
+        for (uint32_t i = 0; i < n && ok; i++)
+            ok = offs[i] + 2 <= text_size && (i == 0 || offs[i] > offs[i-1]) &&
+                 text[offs[i]] == 0x0F && text[offs[i]+1] == 0xA2;
+        if (ok) {
+            for (uint32_t i = 0; i < n; i++) {
+                uint8_t *p = text + offs[i];
+                if (g_cpuid_count < (int)(sizeof g_cpuid_addrs/sizeof g_cpuid_addrs[0])) g_cpuid_addrs[g_cpuid_count++]=(uint64_t)(uintptr_t)p;
+                p[1]=0x0B;   /* 0F A2 -> 0F 0B: ud2 */
+            }
+            vm_protect(mach_task_self(),(vm_address_t)lo,(vm_size_t)(hi-lo),FALSE,VM_PROT_READ|VM_PROT_EXECUTE);
+            return;
+        }
+        avxemu_lc_invalid();
+    }
     uint8_t *p=text;
     while (p<end){
         int zk,off; int len=x86_len(p,end,&zk,&off);
@@ -593,6 +612,7 @@ static void avxemu_patch_cpuid(void){
         if (len==2 && p[0]==0x0F && p[1]==0xA2){
             if (g_cpuid_count < (int)(sizeof g_cpuid_addrs/sizeof g_cpuid_addrs[0])) g_cpuid_addrs[g_cpuid_count++]=(uint64_t)(uintptr_t)p;
             p[0]=0x0F; p[1]=0x0B;   /* ud2 */
+            avxemu_lc_rec_cpuid((uint32_t)(p - text));
         }
         p+=len;
     }
@@ -1004,6 +1024,10 @@ static void avxemu_install(void) {
       if (fc && *fc) cpuid_parse("all", (fc[1]=='f') ? 0 : 1); }   /* on => set all; off => clear all */
     cpuid_parse(getenv("AVXEMU_CPUID_SET"), 1);
     cpuid_parse(getenv("AVXEMU_CPUID_CLR"), 0);
+    /* The three passes below are analysis-heavy and give the same answer every
+     * launch of the same binary: replay a recording of it when there is a good
+     * one, else analyse and record (lcache.c). */
+    avxemu_lc_begin();
     if (g_l1ecx_set|g_l1ecx_clr|g_l7ebx_set|g_l7ebx_clr) avxemu_patch_cpuid();
 
     /* Rewrite lzcnt/tzcnt in the main binary to a faulting form so they get
@@ -1016,6 +1040,7 @@ static void avxemu_install(void) {
      * adds no program-stack pressure. Un-trampolined sites (4-byte isolated,
      * dirty functions) still fault into the SIGILL handler above. */
     long n_tr = avxemu_install_trampolines();
+    avxemu_lc_end();
 
     /* Are we actually emulating on this CPU? If so, install the crash handler so
      * SIMD over-reads (off the end of a buffer into an unmapped page, which a

@@ -1,4 +1,5 @@
-# avxemu's tests. Each later task appends; the _replay_objs block added in Task 7 stays last.
+# avxemu's tests. Each later task appends; the _replay_objs block added in Task 7, and then the
+# AVXEMU_NOCACHE block, stay last.
 
 avxemu_objects(t_cpu cpu.c)
 
@@ -146,3 +147,9 @@ add_test(NAME vex-leak-replay
   COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/vex-leak.sh"
           "${CMAKE_BINARY_DIR}/objects/replay.txt" "${CMAKE_BINARY_DIR}/objects/asm.txt")
 set_tests_properties(vex-leak-replay PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
+
+# Every test here loads avxemu, whose constructor would otherwise record its load-time analysis
+# into ~/Library/Caches/avxemu (src/lcache.c). Only cachetest uses the cache, in a directory of
+# its own; its own launch must not use one either.
+get_property(_avxemu_tests DIRECTORY PROPERTY TESTS)
+set_property(TEST ${_avxemu_tests} APPEND PROPERTY ENVIRONMENT AVXEMU_NOCACHE=1)

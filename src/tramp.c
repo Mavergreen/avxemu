@@ -10,6 +10,7 @@
 #include "decode.h"
 #include "vexops.h"
 #include "lde.h"
+#include "lcache.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -750,6 +751,7 @@ void *avxemu_build_thunk_native_bmi(const tramp_insn *insns, int n, uint64_t res
 /* Place the trampoline for one gathered run of faulting instructions: pick the
  * first start whose 5-byte jmp can't corrupt a branch target, build a thunk for
  * [s,ni), and overwrite that start with `jmp thunk`. Returns 1 if patched. */
+static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_off, size_t re);
 static long emit_run(uint8_t *text, size_t fstart, size_t fend,
                      const tramp_insn *insns, const size_t *offs, int ni,
                      size_t re, const uint8_t *tgt, int has_indirect) {
@@ -765,6 +767,20 @@ static long emit_run(uint8_t *text, size_t fstart, size_t fend,
     if (s < ni && re - offs[s] >= 5) {
         const tramp_insn *ri = insns + s; int rn = ni - s;
         if (g_nstats) nstats_tally(ri, rn);   /* AVXEMU_NATIVE_STATS diagnostic */
+        if (place_run(text, ri, rn, offs[s], re)) {
+            avxemu_lc_rec_run((uint32_t)offs[s], (uint32_t)rn, (uint32_t)re);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Build the thunk for the run ri[0..rn), which starts at site_off and resumes at
+ * re (both relative to text), and point the site at it. Returns 1 if patched.
+ * The analysis (emit_run) and the lcache replay (replay_runs) both end here, so
+ * a replayed trampoline is the one the analysis would have built. */
+static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_off, size_t re) {
+    {
         uint64_t res = (uint64_t)(text + re);
         /* Milestone B: try the register-resident native-SSE thunk first (gated by
          * AVXEMU_NATIVE, default ON). On NULL — op outside the supported set, a
@@ -783,7 +799,7 @@ static long emit_run(uint8_t *text, size_t fstart, size_t fend,
                   : run_is_gpr_only(ri, rn)    ? build_thunk_gpr(ri, rn, res)
                   :                              avxemu_build_thunk(ri, rn, res);
         if (thunk) {
-            uint8_t *site = text + offs[s];
+            uint8_t *site = text + site_off;
             int64_t rel = (int64_t)((uint8_t *)thunk - (site + 5));
             if (rel >= INT32_MIN && rel <= INT32_MAX) {
                 site[0] = 0xE9; int32_t r32 = (int32_t)rel; memcpy(site + 1, &r32, 4);
@@ -1109,6 +1125,43 @@ static uint64_t uleb_t(const uint8_t **p, const uint8_t *e) {
     return r;
 }
 
+/* lcache replay: one recorded run's instructions, decoded afresh. It must still be
+ * a contiguous run of faulting instructions that ends exactly at its resume
+ * point, or the recording does not describe this program. out may be NULL. */
+static int replay_decode(uint8_t *text, size_t text_size, const lc_run *r, tramp_insn *out) {
+    if (r->n == 0 || r->n > MAXRUN || r->site >= text_size || r->resume > text_size ||
+        r->resume < (uint64_t)r->site + 5)
+        return 0;
+    size_t p = r->site;
+    for (uint32_t k = 0; k < r->n; k++) {
+        if (p >= r->resume) return 0;
+        decoded d; int dl = decode(text + p, &d);
+        if (!(dl > 0 && d.op && tramp_faults(&d))) return 0;
+        int zk, oo; int l = x86_len(text + p, text + r->resume, &zk, &oo);
+        if (l <= 0) return 0;
+        if (out) { out[k].addr = (uint64_t)(text + p); out[k].dec = d; }
+        p += (size_t)l;
+    }
+    return p == r->resume;
+}
+
+/* Place every recorded trampoline without the analysis that found it. All runs
+ * are checked before any is placed, so a mismatch leaves text as it was and the
+ * caller can simply analyse instead. */
+static int replay_runs(uint8_t *text, size_t text_size, long *total) {
+    const lc_run *r; uint32_t n = avxemu_lc_runs(&r);
+    for (uint32_t i = 0; i < n; i++) if (!replay_decode(text, text_size, &r[i], 0)) return 0;
+    long t = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        tramp_insn insns[MAXRUN];
+        replay_decode(text, text_size, &r[i], insns);
+        if (g_nstats) nstats_tally(insns, (int)r[i].n);
+        t += place_run(text, insns, (int)r[i].n, r[i].site, r[i].resume);
+    }
+    *total = t;
+    return 1;
+}
+
 /* Install trampolines over the main executable. Returns jmps written. */
 long avxemu_install_trampolines(void) {
     detect_features();
@@ -1158,7 +1211,7 @@ long avxemu_install_trampolines(void) {
     /* thunk pool, placed near __text so jmp rel32 reaches it */
     size_t pool_sz = 96u << 20;
     void *hint = (void *)(((uintptr_t)(text + text_size) + 0x100000) & ~(uintptr_t)0xfff);
-    if (!avxemu_pool_init(hint, pool_sz)) return 0;
+    if (!avxemu_pool_init(hint, pool_sz)) { avxemu_lc_rec_fail(); return 0; }
 
     /* make __text writable for the patch pass (COPY: __TEXT maxprot lacks write),
      * keeping it executable: see avxemu_patch_lzcnt */
@@ -1166,8 +1219,10 @@ long avxemu_install_trampolines(void) {
     uintptr_t lo = (uintptr_t)text & ~(uintptr_t)0xfff;
     uintptr_t hi = ((uintptr_t)text + text_size + 0xfff) & ~(uintptr_t)0xfff;
     if (vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY) != KERN_SUCCESS)
+                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY) != KERN_SUCCESS) {
+        avxemu_lc_rec_fail();
         return 0;
+    }
 
     const uint8_t *fp = (const uint8_t *)(le_vm + slide + (fs_off - le_off));
     const uint8_t *fe = fp + fs_size;
@@ -1196,6 +1251,11 @@ long avxemu_install_trampolines(void) {
     }
 
     uint64_t addr = tseg_vm; uint64_t prev = 0; long total = 0;
+    if (avxemu_lc_mode == LC_REPLAY && replay_runs(text, (size_t)text_size, &total)) {
+        fp = fe; prev = 0;                  /* recorded: skip the analysis loops below */
+    } else if (avxemu_lc_mode == LC_REPLAY) {
+        avxemu_lc_invalid();
+    }
     while (fp < fe) {
         uint64_t delta = uleb_t(&fp, fe); if (!delta) break;
         addr += delta;

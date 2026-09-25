@@ -23,6 +23,7 @@
 #include <cpuid.h>
 
 extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
+#include "lcache.h"
 
 static void emit(const char *s){ (void)write(2, s, strlen(s)); }
 
@@ -87,7 +88,30 @@ long avxemu_patch_lzcnt(void) {
                                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
     if (kr != KERN_SUCCESS) {
         emit("avxemu: vm_protect(__text, COPY) failed — lzcnt/tzcnt NOT patched\n");
+        avxemu_lc_rec_fail();
         return 0;
+    }
+
+    /* lcache.c: replay the prefix edits instead of finding them -- each checked
+     * against the byte actually there before any is written. */
+    if (avxemu_lc_mode == LC_REPLAY) {
+        const lc_byte *b; uint32_t n = avxemu_lc_bytes(&b);
+        int ok = 1;
+        for (uint32_t i = 0; i < n && ok; i++) ok = b[i].off < text_size && text[b[i].off] == b[i].old;
+        if (ok) {
+            for (uint32_t i = 0; i < n; i++) text[b[i].off] = b[i].neu;
+            vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
+                       VM_PROT_READ | VM_PROT_EXECUTE);
+            return (long)n;
+        }
+        avxemu_lc_invalid();
+    }
+    /* Recording: the pass edits bytes in place in several places (lde.c), so
+     * take its result as the difference it made rather than instrument each. */
+    uint8_t *before = 0;
+    if (avxemu_lc_mode == LC_RECORD) {
+        before = malloc((size_t)text_size);
+        if (before) memcpy(before, text, (size_t)text_size); else avxemu_lc_rec_fail();
     }
 
     const uint8_t *fp = (const uint8_t *)(le_vm + slide + (fs_off - le_off));
@@ -115,6 +139,12 @@ long avxemu_patch_lzcnt(void) {
      * exports table doesn't bound). A final linear sweep catches the stragglers;
      * sites already patched are now F0-prefixed and are skipped. */
     { long lin = lde_scan_zcnt(text, (size_t)text_size, 1); if (lin > 0) patched += lin; }
+
+    if (before) {
+        for (size_t i = 0; i < (size_t)text_size; i++)
+            if (before[i] != text[i]) avxemu_lc_rec_byte((uint32_t)i, before[i], text[i]);
+        free(before);
+    }
 
     vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
                VM_PROT_READ | VM_PROT_EXECUTE);
