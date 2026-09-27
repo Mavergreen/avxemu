@@ -41,7 +41,19 @@ anything original in that repository is public domain / CC0 / WTFPL. See `LICENS
 
 ## The dylib mavericksforever.com serves
 
-(Filled in by the reproduction gate before release 1.)
+Checked 2026-09-27 on Mac OS X 10.9 with `Apple LLVM version 6.0 (clang-600.0.57) (based on LLVM 3.5svn)`.
+
+- `https://mavericksforever.com/claude/libavxemu.dylib` is 82,616 bytes, sha256
+  `3998619b2a3de0654629b67a9ae934f1e8c7040d192032bdfa04049118a79407`.
+- This repo's CMake build of release 1's source compiles byte-identical objects; linked the
+  way the old `build.sh` linked them (no SDK), they reproduce that hash exactly.
+- Linked against the pinned 10.9 SDK, as every family build is, the result has the same
+  code, symbols, binds, rebases and exports. Only `LC_DYLIB_CODE_SIGN_DRS` differs (24 bytes
+  instead of 64), with the link-edit offsets and UUID that follow from it.
+- Release `20260908.1` is cross-built in CI with the runner's Xcode clang (shipyard's
+  toolchain sets the SDK, not the compiler), so its bytes differ again. Its behaviour is
+  checked by the hermetic and replay tests, which pass on both builds, and by a run of the
+  shipped dylib on Mac OS X 10.9 before release (`RELEASING.md`).
 
 ## Earlier extraction
 
