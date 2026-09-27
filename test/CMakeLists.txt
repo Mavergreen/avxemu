@@ -68,3 +68,8 @@ set_tests_properties(run-wrapper inject memtest tramptest overread reloctest nat
   PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 set_tests_properties(selftest linkhook linkhook-no-rebind
   PROPERTIES LABELS mavericks SKIP_RETURN_CODE 77)
+
+avxemu_objects(t_refdigest refdigest.c cpu.c)
+avxemu_test_exe(refdigest_test SOURCES refdigest_test.c LINK t_refdigest)
+add_test(NAME refdigest COMMAND $<TARGET_FILE:refdigest_test>)
+set_tests_properties(refdigest PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)

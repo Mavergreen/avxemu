@@ -37,6 +37,7 @@ unsigned cpu_features(void) {
 int cpu_translated(void) {
     const char *forced = getenv("AVXEMU_TEST_TRANSLATED");
     if (forced && strcmp(forced, "1") == 0) return 1;
+    if (forced && strcmp(forced, "0") == 0) return 0;
 #ifdef __APPLE__
     int v = 0;
     size_t sz = sizeof v;
