@@ -1,0 +1,16 @@
+AVXEmu is dedicated to the public domain.
+
+The authors waive all copyright and related or neighboring rights to this
+work, worldwide, under CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Where that dedication is not legally possible, this work is licensed under
+the WTFPL: http://www.wtfpl.net/
+
+Authors: Wowfunhappy <Wowfunhappy@gmail.com> (original emulator)
+         Amitai Schleier <schmonz-web-git@schmonz.com>
+
+Extracted from Wowfunhappy/Mavericks-Porting-Resources, whose author stated
+the terms above for all original code in that repository
+(https://github.com/Wowfunhappy/Mavericks-Porting-Resources/issues/4).
+This project contains no third-party code.
