@@ -76,7 +76,7 @@ set_tests_properties(refdigest PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 
 set(AVXEMU_REPLAY_PROGRAMS "")
 function(avxemu_oracle name)
-  cmake_parse_arguments(A "" "" "DRIVER;HW;ASM;LINK" ${ARGN})
+  cmake_parse_arguments(A "UNREGISTERED" "" "DRIVER;HW;ASM;LINK" ${ARGN})
   avxemu_objects(${name}_driver ${A_DRIVER})
   target_include_directories(${name}_driver PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
   set(objs $<TARGET_OBJECTS:${name}_driver> $<TARGET_OBJECTS:t_refdigest>)
@@ -91,12 +91,15 @@ function(avxemu_oracle name)
   endforeach()
   add_executable(${name} ${A_ASM} ${objs})
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
+  set(AVXEMU_REPLAY_PROGRAMS ${AVXEMU_REPLAY_PROGRAMS} ${name} PARENT_SCOPE)
+  if(A_UNREGISTERED)
+    return()
+  endif()
   add_test(NAME ${name}-replay COMMAND $<TARGET_FILE:${name}> check "${CMAKE_CURRENT_SOURCE_DIR}/reference/${name}.ref")
   add_test(NAME ${name}-record COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/record-matches.sh" $<TARGET_FILE:${name}>
            "${CMAKE_BINARY_DIR}/reference/${name}.ref" "${CMAKE_CURRENT_SOURCE_DIR}/reference/${name}.ref")
   set_tests_properties(${name}-replay PROPERTIES LABELS replay SKIP_RETURN_CODE 77)
   set_tests_properties(${name}-record PROPERTIES LABELS hardware SKIP_RETURN_CODE 77)
-  set(AVXEMU_REPLAY_PROGRAMS ${AVXEMU_REPLAY_PROGRAMS} ${name} PARENT_SCOPE)
 endfunction()
 
 avxemu_objects(t_exec "${PROJECT_SOURCE_DIR}/src/exec.c" "${PROJECT_SOURCE_DIR}/src/exec_bmi.c"
@@ -105,6 +108,14 @@ avxemu_oracle(oracle DRIVER oracle.c HW oracle_hw.c LINK t_exec)
 
 avxemu_objects(t_bmi "${PROJECT_SOURCE_DIR}/src/exec_bmi.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_oracle(bmi_oracle DRIVER bmi_oracle.c HW bmi_hw.c LINK t_bmi)
+
+# Built, so their drivers stay compiled and inside vex-leak-replay, but not registered: at this
+# source both fault at load on every CPU (STUBS_IN_TEXT), so neither can record a reference, and
+# a test with no reference and no way to run can never fail. Release 2 registers them, together
+# with their references, once the maintainer's follow-up fixes to load-time patching land.
+avxemu_oracle(patchtest UNREGISTERED DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.s
+              LINK avxemu_core avxemu_asm)
+avxemu_oracle(bmimem UNREGISTERED DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
 
 set(_replay_objs $<TARGET_OBJECTS:t_refdigest>)
 foreach(p IN LISTS AVXEMU_REPLAY_PROGRAMS)

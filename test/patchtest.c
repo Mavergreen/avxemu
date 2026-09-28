@@ -11,6 +11,9 @@
  * patched bytes, so the test never rewrites its own text.
  */
 #include "decode.h"
+#include "patchtest_hw.h"
+#include "refdigest.h"
+#include "cpu.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,11 +26,6 @@ extern uint64_t e2e_ptzcnt64(uint64_t);
 extern uint32_t e2e_plzcnt32(uint32_t);
 extern uint32_t e2e_ptzcnt32(uint32_t);
 extern uint64_t e2e_plzcnt_mem(const uint64_t *);
-
-static uint64_t hw_lzcnt64(uint64_t x){ uint64_t r; __asm__("lzcntq %1,%0":"=r"(r):"r"(x)); return r; }
-static uint64_t hw_tzcnt64(uint64_t x){ uint64_t r; __asm__("tzcntq %1,%0":"=r"(r):"r"(x)); return r; }
-static uint32_t hw_lzcnt32(uint32_t x){ uint32_t r; __asm__("lzcntl %1,%0":"=r"(r):"r"(x)); return r; }
-static uint32_t hw_tzcnt32(uint32_t x){ uint32_t r; __asm__("tzcntl %1,%0":"=r"(r):"r"(x)); return r; }
 
 static int test_decode(void){
     struct { uint8_t b[6]; int len; vex_op op; const char *nm; } v[] = {
@@ -48,44 +46,49 @@ static int test_decode(void){
     return fail;
 }
 
-static int test_path(void){
-    /* a spread of inputs: 0, all-ones, every single-bit, and mixed patterns */
-    uint64_t inputs[80]; int n=0;
-    inputs[n++]=0; inputs[n++]=~0ull; inputs[n++]=1; inputs[n++]=0x8000000000000000ull;
-    for(int b=0;b<64;b++) inputs[n++]=1ull<<b;
-    inputs[n++]=0x00000000FFFFFFFFull; inputs[n++]=0xFFFFFFFF00000000ull;
-    inputs[n++]=0x0123456789ABCDEFull; inputs[n++]=0xFEDCBA9876543210ull;
-    inputs[n++]=0x00FF00FF00FF00FFull; inputs[n++]=0xDEADBEEFull;
+static int test_path(int rec) {
+    uint64_t inputs[80]; int n = 0;
+    inputs[n++] = 0; inputs[n++] = ~0ull; inputs[n++] = 1; inputs[n++] = 0x8000000000000000ull;
+    for (int b = 0; b < 64; b++) inputs[n++] = 1ull << b;
+    inputs[n++] = 0x00000000FFFFFFFFull; inputs[n++] = 0xFFFFFFFF00000000ull;
+    inputs[n++] = 0x0123456789ABCDEFull; inputs[n++] = 0xFEDCBA9876543210ull;
+    inputs[n++] = 0x00FF00FF00FF00FFull; inputs[n++] = 0xDEADBEEFull;
 
-    int fail=0, checked=0;
-    for(int i=0;i<n;i++){
-        uint64_t x=inputs[i];
-        uint64_t e64=e2e_plzcnt64(x), r64=hw_lzcnt64(x);
-        if(e64!=r64){ printf("  lzcnt64(%016llx) emu=%llu hw=%llu MISMATCH\n",(unsigned long long)x,(unsigned long long)e64,(unsigned long long)r64); fail++; }
-        uint64_t et=e2e_ptzcnt64(x), rt=hw_tzcnt64(x);
-        if(et!=rt){ printf("  tzcnt64(%016llx) emu=%llu hw=%llu MISMATCH\n",(unsigned long long)x,(unsigned long long)et,(unsigned long long)rt); fail++; }
-        uint32_t x32=(uint32_t)x;
-        uint32_t el=e2e_plzcnt32(x32), rl=hw_lzcnt32(x32);
-        if(el!=rl){ printf("  lzcnt32(%08x) emu=%u hw=%u MISMATCH\n",x32,el,rl); fail++; }
-        uint32_t etz=e2e_ptzcnt32(x32), rtz=hw_tzcnt32(x32);
-        if(etz!=rtz){ printf("  tzcnt32(%08x) emu=%u hw=%u MISMATCH\n",x32,etz,rtz); fail++; }
-        uint64_t em=e2e_plzcnt_mem(&x), rm=hw_lzcnt64(x);
-        if(em!=rm){ printf("  lzcnt(mem)(%016llx) emu=%llu hw=%llu MISMATCH\n",(unsigned long long)x,(unsigned long long)em,(unsigned long long)rm); fail++; }
-        checked+=5;
+    enum { L64, T64, L32, T32, LMEM, NOPS };
+    static const char *const names[NOPS] = {"lzcnt64", "tzcnt64", "lzcnt32", "tzcnt32", "lzcnt_mem"};
+    struct ref_op ops[NOPS];
+    for (int k = 0; k < NOPS; k++) ref_op_init(&ops[k], names[k]);
+    for (int i = 0; i < n; i++) {
+        uint64_t x = inputs[i]; uint32_t x32 = (uint32_t)x;
+        uint64_t emu[NOPS] = { e2e_plzcnt64(x), e2e_ptzcnt64(x), e2e_plzcnt32(x32), e2e_ptzcnt32(x32), e2e_plzcnt_mem(&x) };
+        uint64_t hw[NOPS] = {0};
+        if (rec) {
+            hw[L64] = patch_hw_lzcnt64(x); hw[T64] = patch_hw_tzcnt64(x);
+            hw[L32] = patch_hw_lzcnt32(x32); hw[T32] = patch_hw_tzcnt32(x32); hw[LMEM] = patch_hw_lzcnt64(x);
+        }
+        for (int k = 0; k < NOPS; k++) {
+            if (rec) {
+                ref_hw(&ops[k], &hw[k], 8);
+                if (hw[k] != emu[k])
+                    printf("  %s(%016llx) emu=%llu hw=%llu MISMATCH\n", names[k], (unsigned long long)x,
+                           (unsigned long long)emu[k], (unsigned long long)hw[k]);
+            }
+            ref_emu(&ops[k], &emu[k], 8);
+            ref_case(&ops[k], !rec || hw[k] == emu[k]);
+        }
     }
-    printf("fault->emulate patched lzcnt/tzcnt: %d/%d ok\n",checked-fail,checked);
-    return fail;
+    printf("fault->emulate patched lzcnt/tzcnt:\n");
+    return ref_report(ops, NOPS);
 }
 
-int main(void){
-    setvbuf(stdout,NULL,_IONBF,0);
-    setenv("AVXEMU_NOPATCH","1",1);   /* we embed patched bytes by hand */
-    avxemu_test_ud2 = 0;              /* production path: decode at the faulting PC */
+int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    int rec = ref_init(argc, argv, "patchtest", CPU_LZCNT | CPU_BMI1) == REF_RECORD;
+    setenv("AVXEMU_NOPATCH", "1", 1);
+    avxemu_test_ud2 = 0;
     avxemu_force_install();
     printf("== patched (F0/lock) lzcnt/tzcnt ==\n");
-    int f1=test_decode();
-    int f2=test_path();
-    int tot=f1+f2;
-    printf("\nPATCHTEST TOTAL: %d failure(s)\n",tot);
-    return tot?1:0;
+    int tot = test_decode() + test_path(rec) + ref_finish();
+    printf("\nPATCHTEST TOTAL: %d failure(s)\n", tot);
+    return tot ? 1 : 0;
 }
