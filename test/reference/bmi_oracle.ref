@@ -1,0 +1,21 @@
+# avxemu reference: bmi_oracle
+# recorded on real silicon; only the lines that are not comments are compared
+# cpu: Intel(R) Core(TM) i7-5650U CPU @ 2.20GHz
+# os: Darwin 24.6.0
+# cc: Apple LLVM 17.0.0 (clang-1700.0.13.5)
+andn	300000	ca522bf3972de73b
+blsi	300000	0fb8d900dba34e07
+blsr	300000	3c59d6021cf91711
+blsmsk	300000	a868ad878b45de2c
+bzhi	300000	0577caa551e51016
+bextr	300000	aac8624e18c91d84
+mulx	300000	137f53cf5e2e8d22
+pdep	300000	65713c8a31061857
+pext	300000	fe3b12e0520fc857
+rorx	300000	36ffd03b5ec17884
+shlx	300000	d824d0ab49f75ede
+shrx	300000	cb81eca2dd1bb85b
+sarx	300000	e6a24a16bf1fc03b
+tzcnt	300000	ab0f7bca14cc760b
+lzcnt	300000	acfb658e5b9b8028
+movbe	300000	b9c58d07d061eacb

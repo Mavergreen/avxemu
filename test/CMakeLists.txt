@@ -103,6 +103,9 @@ avxemu_objects(t_exec "${PROJECT_SOURCE_DIR}/src/exec.c" "${PROJECT_SOURCE_DIR}/
                       "${PROJECT_SOURCE_DIR}/src/softfma.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_oracle(oracle DRIVER oracle.c HW oracle_hw.c LINK t_exec)
 
+avxemu_objects(t_bmi "${PROJECT_SOURCE_DIR}/src/exec_bmi.c" "${PROJECT_SOURCE_DIR}/src/names.c")
+avxemu_oracle(bmi_oracle DRIVER bmi_oracle.c HW bmi_hw.c LINK t_bmi)
+
 set(_replay_objs $<TARGET_OBJECTS:t_refdigest>)
 foreach(p IN LISTS AVXEMU_REPLAY_PROGRAMS)
   list(APPEND _replay_objs $<TARGET_OBJECTS:${p}_driver>)
