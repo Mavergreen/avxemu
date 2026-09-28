@@ -1,4 +1,25 @@
-# avxemu — run AVX2/FMA/BMI binaries on pre-Haswell CPUs
+# AVXEmu
+
+**This README has not been read or edited by a human yet.** Until it has, this project cannot cut
+its first release.
+
+AVXEmu runs AVX2/FMA/BMI binaries on pre-Haswell CPUs that have AVX1 and SSE4.2 (Sandy Bridge,
+Ivy Bridge). Wowfunhappy wrote it for [Mavericks Forever](https://mavericksforever.com/claude/),
+and Amitai Schleier's fixes and features followed in the same repository. It is now developed
+here; see `PROVENANCE.md`.
+
+## Install
+
+Download `avxemu-<version>.pkg` from the
+[latest release](https://github.com/Mavergreen/avxemu/releases/latest) and open it (Mac OS X
+10.9.5 or later, Intel). It installs `/usr/local/mavergreen/avxemu/lib/libavxemu.dylib` and an
+updater that keeps it current. To load it into a program:
+
+    DYLD_INSERT_LIBRARIES=/usr/local/mavergreen/avxemu/lib/libavxemu.dylib <program>
+
+or link it, adding `-rpath /usr/local/mavergreen/avxemu/lib` (its install name is
+`@rpath/libavxemu.dylib`). An installer that ships its own copy can take the dylib out of the
+package without installing it: `sh contrib/extract-libavxemu.sh avxemu-<version>.pkg <dir>`.
 
 A trap-and-emulate + in-memory-rewrite layer that lets a binary compiled for
 Intel **Haswell** (AVX2 + FMA + BMI1/BMI2 + LZCNT + MOVBE) run on a CPU that only
@@ -139,47 +160,39 @@ one-second-longer startup and ~20% slower execution. A SIMD-bound burst (huge
 file/string crunch) is worse on those phases. The only way to beat this is a
 native no-AVX2 build; emulation can't match "just run the instruction."
 
-## Build / run
+## Building
 
-```sh
-./build.sh            # build core (SSE-only) + run all tests + emit libavxemu.dylib
-./build.sh install    # also copy the dylib into ../../Mavericks Forever/public/claude
-```
+    shipyard-cmake --preset native      # on Mac OS X 10.9
+    shipyard-cmake --preset cross       # on a modern Mac, against the pinned 10.9 SDK
+    shipyard-cmake --build --preset <native|cross>
+    shipyard-ctest --preset <native|cross>
 
-Requires a machine with AVX2 (any Haswell+) and clang. No external deps. Current
-status: **all suites pass with 0 failures.**
+`shipyard-cmake` comes from [shipyard](https://github.com/Mavergreen/shipyard). The build is
+out of tree; `libavxemu.dylib` lands in `$TMPDIR/mm-build/<checkout>-<preset>/`.
 
 ## Testing without the target hardware
 
-The target Macs are scarce, but **this dev machine has AVX2** and is therefore a
-near-perfect oracle. The suite (in `build.sh`) layers:
+Every step of the old `build.sh` is a ctest, labelled by what it needs:
 
-1. **Differential oracle (`test/oracle.c`, `test/bmi_oracle.c`).** For every op,
-   run the *real* AVX2/FMA/BMI instruction and the SSE emulation on identical
-   random inputs; assert bit-equality (incl. FMA edge cases: 0/-0/inf/nan/
-   subnormal/overflow, and BMI defined flags).
-2. **Decoder vs the real binary (`test/bintest.c`, `test/zdecode.c`).** Validate
-   every VEX/BMI instruction in the actual Claude binary — **0 length mismatches,
-   0 op mismatches.**
-3. **Native-vs-emulated fuzzer (`test/fuzz.c`).** Run every distinct register-only
-   vector instruction in the binary both natively and emulated, comparing all 16
-   YMM registers — **17,521 insns, 140,168 runs, 0 mismatches.**
-4. **Fault injection (`test/inject.c`).** Real `SIGILL` → handler → decode →
-   emulate → writeback → resume, for reg / memory / BMI / two-dest paths.
-5. **Trampoline thunk (`test/tramptest.c`).** Drive a thunk through a full known
-   machine state and assert the destination gets the result **and every other
-   register, all of YMM, and RFLAGS are preserved bit-for-bit** (this is what
-   catches a thunk that disturbs flags).
-6. **Forced end-to-end on Haswell.** `AVXEMU_FORCETRAMP` / `AVXEMU_FORCEPATCH`
-   make every emulatable instruction trampoline / every lzcnt patch on an AVX2
-   host, so the whole load→scan→patch→thunk→emulate path runs on hardware we own.
-   `build.sh` asserts forced-trampolined `claude --help` is **byte-identical to
-   native**, and the over-read fixup + PROT_NONE-guard-page safety are exercised
-   directly.
+| label | needs |
+|---|---|
+| `hermetic` | only the emulator, on any x86_64 |
+| `replay` | only the emulator: checks it against outputs recorded on AVX2 silicon |
+| `hardware` | a real AVX2/FMA/BMI CPU (not Rosetta): re-records and compares |
+| `mavericks` | Mac OS X 10.9's dyld |
+| `claude-binary` | `CLAUDE_BIN` naming a Claude Code binary |
 
-Only the structural target-only facts remain — the AVX1 (vs AVX2) signal-frame
-flavor and coexistence with Bun/JSC's handlers under real load — and those are
-now **confirmed on a real Ivy Bridge Mac** (see Status).
+A test whose needs are unmet skips. The differential oracles `oracle` and `bmi_oracle` run the
+real instruction beside the emulator in `record` mode and write `test/reference/<name>.ref`: per
+op, a digest of the hardware's outputs. Their `check` mode replays the emulator alone against
+the committed reference, so it runs on any x86_64: CI runs it under Rosetta, and the 10.9
+machine runs it on the target CPU. `RELEASING.md` says which machine runs what before a release.
+
+At release 1's source, a test program that links the emulator's core into itself faults at
+load on every CPU: the load-time constructor patches the `__text` it is running from. Release 2
+brings the fixes. Until then `inject`, `memtest`, `tramptest` and `overread` are marked as known
+failures, and the `patchtest` and `bmimem` oracles are built but not registered as tests, and
+have no references.
 
 ## Status
 
@@ -209,12 +222,15 @@ now **confirmed on a real Ivy Bridge Mac** (see Status).
       frame with `sub`, which clobbers the arithmetic flags **before** they were
       saved, so a flag-neutral instruction (e.g. a constant-loading `vpbroadcast`
       the compiler scheduled between a `cmp` and its `jcc`) corrupted the branch.
-      Fixed by using `lea` (flag-neutral); `tramptest` now seeds every arithmetic
-      flag so the class can't regress.
+      Fixed by using `lea` (flag-neutral). `tramptest` seeds every arithmetic flag
+      to catch the class, but at release 1 it is a known failure (see "Testing
+      without the target hardware"), so it guards against a regression only from
+      release 2.
 
 ## Layout
 
 ```
+CMakeLists.txt    top-level build (out-of-tree; see Building)
 src/ymm.h         256-bit value type (raw bytes)
 src/regs.h        cpu_state the emulator touches
 src/regfile.h     flat register-file the SIGILL + trampoline paths both fill
@@ -230,6 +246,7 @@ src/tramp.c       eager trampoline scanner/installer + thunk dispatch
 src/tramp.s       trampoline thunk template + side-stack switch
 src/handler.c     SIGILL emulate, SIGSEGV/SIGBUS over-read fixup, constructor
 src/selftest.s/.c in-dylib preflight (AVXEMU_SELFTEST)
+test/CMakeLists.txt  test build + ctest registration (labels, skips, known failures)
 test/oracle.c        vector + FMA differential oracle
 test/bmi_oracle.c    BMI differential oracle (values + flags)
 test/bmimem.c/.s     BMI with a memory operand: emulated vs native
@@ -243,7 +260,8 @@ test/tramptest.c     trampoline thunk: emulate + full register/flag preservation
 test/overread.c      page-safe vector load across an unmapped page
 test/overread_fault.c / guard_page.c   runtime over-read fixup + guard-page safety
 test/inject.c        decoder check + end-to-end fault-injection driver
-build.sh             build everything, run all tests, emit the dylib
+packaging/        build-pkg.sh: stages the dylib and updater, builds the .pkg with shipyard
+contrib/          scripts for consumers, e.g. extract-libavxemu.sh
 ```
 
 ## Operation & debugging
@@ -258,7 +276,7 @@ emulator up were removed once it stabilized. Four env knobs remain:
   trap→decode→emulate→writeback path on that exact CPU and exits PASS/FAIL,
   *without* needing Claude Code. First thing to run on a new machine:
   ```sh
-  AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=~/.local/share/claude-mavericks/libavxemu.dylib /usr/bin/true
+  AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=/usr/local/mavergreen/avxemu/lib/libavxemu.dylib /usr/bin/true
   ```
 - **`AVXEMU_DISABLE=1`** — bypass the emulator entirely (escape hatch).
 - **`AVXEMU_FORCETRAMP=1` / `AVXEMU_FORCEPATCH=1`** — *dev/test only.* Force
@@ -273,9 +291,10 @@ proven vs silicon), the byte-identical forced-trampoline check, and
 
 ## Installer integration
 
-`Mavericks Forever/public/claude/install.sh` downloads `libavxemu.dylib` into
-`~/.local/share/claude-mavericks/` and the `claude` wrapper exports
-`DYLD_INSERT_LIBRARIES=…/libavxemu.dylib` **only when the CPU lacks AVX2**
-(`sysctl machdep.cpu.leaf7_features`). AVX2-capable Macs run the native binary
-untouched; older Macs get transparent emulation. The dylib is built natively on
-Mavericks, so it needs none of the Mach-O patching the main binary requires.
+Before this release, `Mavericks Forever/public/claude/install.sh` downloaded
+`libavxemu.dylib` into `~/.local/share/claude-mavericks/`, and its `claude` wrapper
+exported `DYLD_INSERT_LIBRARIES=…/libavxemu.dylib` only when the CPU lacked AVX2
+(`sysctl machdep.cpu.leaf7_features`); AVX2-capable Macs ran the native binary untouched,
+older Macs got transparent emulation. The dylib needs none of the Mach-O patching the main
+binary requires: it was built natively on Mavericks then, and is cross-built against the
+pinned 10.9 SDK now.
