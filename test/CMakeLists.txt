@@ -117,6 +117,19 @@ avxemu_oracle(patchtest UNREGISTERED DRIVER patchtest.c HW patchtest_hw.c ASM pa
               LINK avxemu_core avxemu_asm)
 avxemu_oracle(bmimem UNREGISTERED DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
 
+avxemu_objects(t_decode "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/names.c")
+avxemu_objects(t_lde "${PROJECT_SOURCE_DIR}/src/lde.c")
+avxemu_test_exe(bintest SOURCES bintest.c LINK t_decode)
+avxemu_test_exe(patchdiff SOURCES patchdiff.c LINK t_lde)
+avxemu_test_exe(zdecode SOURCES zdecode.c LINK t_lde t_decode)
+avxemu_test_exe(fuzz SOURCES fuzz.c fuzz.s LINK avxemu_core avxemu_asm)
+add_test(NAME claude-decode COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-decode.sh"
+  $<TARGET_FILE:bintest> $<TARGET_FILE:patchdiff> $<TARGET_FILE:zdecode> "${CMAKE_BINARY_DIR}/claude-decode")
+add_test(NAME claude-hardware COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-hardware.sh"
+  $<TARGET_FILE:cpuprobe> $<TARGET_FILE:fuzz> $<TARGET_FILE:avxemu> "${CMAKE_BINARY_DIR}/claude-hardware")
+set_tests_properties(claude-decode PROPERTIES LABELS claude-binary SKIP_RETURN_CODE 77)
+set_tests_properties(claude-hardware PROPERTIES LABELS "claude-binary;hardware" SKIP_RETURN_CODE 77)
+
 set(_replay_objs $<TARGET_OBJECTS:t_refdigest>)
 foreach(p IN LISTS AVXEMU_REPLAY_PROGRAMS)
   list(APPEND _replay_objs $<TARGET_OBJECTS:${p}_driver>)
