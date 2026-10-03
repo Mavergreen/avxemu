@@ -46,6 +46,17 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/objects/core.txt"
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/objects/asm.txt"
   CONTENT "$<JOIN:$<TARGET_OBJECTS:avxemu_asm>,\n>\n")
 
+if(AVXEMU_BUILD_UPDATER)
+  include(MavericksSparkle)
+  mavericks_add_updater_app(
+    PRODUCT avxemu
+    PRODUCT_NAME "AVXEmu"
+    ALLOW_GENERIC
+    VERSION "${AVXEMU_VERSION}"
+    CONFIRM_TITLE "AVXEmu updated"
+    CONFIRM_BODY "AVXEmu was updated. Programs that load it use the new version the next time they start.")
+endif()
+
 enable_testing()
 # shipyard's run-repo-tests.sh drives ctest only when THIS file declares an add_test, so the
 # first test lives here rather than in test/CMakeLists.txt: without it CI would run nothing.
