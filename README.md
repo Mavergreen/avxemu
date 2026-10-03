@@ -190,7 +190,7 @@ machine runs it on the target CPU. `RELEASING.md` says which machine runs what b
 
 At release 1's source, a test program that links the emulator's core into itself faults at
 load on every CPU: the load-time constructor patches the `__text` it is running from. Release 2
-brings the fixes. Until then `inject`, `memtest`, `tramptest` and `overread` are marked as known
+brings the fixes. `overread-fault` is a known failure under Rosetta, where the fault handler cannot yet repair the straddling read. Until then `inject`, `memtest`, `tramptest` and `overread` are marked as known
 failures, and the `patchtest` and `bmimem` oracles are built but not registered as tests, and
 have no references.
 

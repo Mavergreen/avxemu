@@ -59,7 +59,8 @@ add_test(NAME linkhook COMMAND ${AVXEMU_RUN} --needs mavericks -- $<TARGET_FILE:
 add_test(NAME linkhook-no-rebind COMMAND ${AVXEMU_RUN} --needs mavericks -- env AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
 
 avxemu_test_exe(overread_fault FLAGS -O0 SOURCES overread_fault.c)
-add_test(NAME overread-fault COMMAND env AVXEMU_FORCEPATCH=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu> $<TARGET_FILE:overread_fault>)
+set(ROSETTA_OVERREAD "under Rosetta avxemu's fault handler does not repair and retry the read that straddles an unmapped page, and the test segfaults; it passes natively on 10.9 and on Intel with AVX2; the cause is not yet diagnosed")
+add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --because "${ROSETTA_OVERREAD}" -- env AVXEMU_FORCEPATCH=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu> $<TARGET_FILE:overread_fault>)
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # platform: macOS-only -- sw_vers decides which macOS a test is running on
 #   usage: run.sh --cpuprobe PROBE [--needs mavericks] [--fails-when COND --because WHY] -- CMD [ARG]...
-#          COND is no-avx2, modern-macos or always. An unmet --needs exits 77 (ctest's SKIP). With
+#          COND is no-avx2, modern-macos, rosetta or always. An unmet --needs exits 77 (ctest's SKIP). With
 #          --fails-when, CMD must fail where COND holds and pass where it does not; either
 #          surprise fails, so a mark cannot outlive its cause. CMD exiting 77 skips under any mark.
 set -eu
@@ -30,6 +30,9 @@ holds() {
     no-avx2)
       feats=$("$probe") || { echo "run.sh: $probe failed" >&2; exit 2; }
       case " $feats " in *" avx2 "*) return 1 ;; *) return 0 ;; esac ;;
+    rosetta)
+      feats=$("$probe") || { echo "run.sh: $probe failed" >&2; exit 2; }
+      case " $feats " in *" translated "*) return 0 ;; *) return 1 ;; esac ;;
     *) echo "run.sh: unknown condition $1" >&2; exit 2 ;;
   esac
 }
