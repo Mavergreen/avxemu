@@ -44,7 +44,7 @@ int ref_begin(enum ref_mode m, const char *s, const char *p) {
     if (m == REF_RECORD) return 0;
     FILE *f = fopen(p, "r");
     if (!f) {
-        fprintf(stderr, "refdigest: cannot read %s -- record a reference on real silicon (RELEASING.md)\n", p);
+        fprintf(stderr, "refdigest: cannot read %s -- record a reference on real silicon (INGREDIENTS.md, \"Re-recording a reference\")\n", p);
         return -1;
     }
     char buf[256], want[128];

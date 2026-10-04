@@ -53,7 +53,7 @@ Checked 2026-09-27 on Mac OS X 10.9 with `Apple LLVM version 6.0 (clang-600.0.57
 - Release `20260908.1` is cross-built in CI with the runner's Xcode clang (shipyard's
   toolchain sets the SDK, not the compiler), so its bytes differ again. Its behaviour is
   checked by the hermetic and replay tests, which pass on both builds, and by a run of the
-  shipped dylib on Mac OS X 10.9 before release (`RELEASING.md`).
+  shipped dylib on Mac OS X 10.9 before release (INGREDIENTS.md, "Releasing").
 
 ## Earlier extraction
 
