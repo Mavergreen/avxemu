@@ -14,6 +14,7 @@
 #include "vexops.h"
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern int   avxemu_pool_init(void *hint, size_t cap);
@@ -37,6 +38,9 @@ extern uint64_t minspill_blsm_labels[];       /* _blsm0.._blsm8 blsmsk sample ad
 extern uint64_t minspill_andn_labels[];       /* _andn0.._andn11 andn sample addresses */
 extern uint64_t minspill_mulx_labels[];       /* _mx0.._mx23 mulx sample addresses */
 extern uint64_t avxemu_minspill_rz8, avxemu_minspill_rz16;  /* red-zone snapshots */
+/* tramp.c's run element (must match) and its tier selection, as place_run makes it */
+typedef struct { uint64_t addr; decoded dec; } tramp_insn;
+extern void *avxemu_select_thunk(const tramp_insn *ri, int rn, uint64_t res);
 #define RZ_SENTINEL 0x5A5A5A5A5A5A5A5Aull
 
 #define F_CF 0x001u
@@ -107,13 +111,42 @@ static decoded dec_blsm(int idx)    { return dec_from(minspill_blsm_labels, idx)
 static decoded dec_andn(int idx)    { return dec_from(minspill_andn_labels, idx); }
 static decoded dec_mulx(int idx)    { return dec_from(minspill_mulx_labels, idx); }
 
-int main(void) {
+/* Which tier does place_run's selection pick for a single supported op? With minspill on,
+ * the minimal-spill thunk: the same bytes as the emitter's, up to the trailing jmp. With
+ * AVXEMU_MINSPILL=0, another tier (the native block for these two). */
+static void check_selection(int want_on) {
+    decoded ds[2]; ds[0] = dec_at(0); ds[1] = dec_from(minspill_mulx_labels, 0);
+    const char *nm[2] = { "lzcnt", "mulx" };
+    for (int k = 0; k < 2; k++) {
+        tramp_insn ti; ti.addr = 0; ti.dec = ds[k];
+        uint8_t *sel = avxemu_select_thunk(&ti, 1, resume_target());
+        uint8_t *ref = avxemu_emit_minspill_block(&ds[k], resume_target());
+        int is_minspill = sel && ref && memcmp(sel, ref, 16) == 0;
+        int ok = sel && ref && is_minspill == want_on;
+        printf("  selection, %-5s minspill %s: %s tier -- %s\n", nm[k], want_on ? "on " : "off",
+               !sel ? "no" : is_minspill ? "minimal-spill" : "another", ok ? "ok" : "FAIL");
+        if (!ok) g_fail++;
+    }
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    /* The setting under test: "on" runs with AVXEMU_MINSPILL unset (the default), "off"
+     * with AVXEMU_MINSPILL=0. The emitter checks below are the same either way. */
+    const char *e = getenv("AVXEMU_MINSPILL");
+    int on = !(e && e[0] == '0');
+    if (argc != 2 || (strcmp(argv[1], "on") && strcmp(argv[1], "off"))) {
+        printf("usage: minspilltest on|off\n"); return 2;
+    }
+    if (on != !strcmp(argv[1], "on")) {
+        printf("minspilltest %s: AVXEMU_MINSPILL=%s says otherwise\n", argv[1], e ? e : "(unset)"); return 2;
+    }
     /* Bump allocator with no free: every differential case leaks a fresh thunk, so the
      * cap must cover the cumulative total across ALL ops (the MULX suite alone adds
      * 1024 blocks). 16 MiB is comfortably above the sum. */
     if (!avxemu_pool_init(0, 1 << 24)) { printf("pool_init failed\n"); return 1; }
-    printf("== minimal-spill live-register thunk ==\n");
+    printf("== minimal-spill live-register thunk (minspill %s) ==\n", argv[1]);
+    check_selection(on);
 
     /* (0) no-op thunk: jmp resume. Validates plumbing: out == in for every GPR
      * (slot 4 = rsp delta, must be 0) and rflags. */

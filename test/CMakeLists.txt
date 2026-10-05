@@ -44,12 +44,13 @@ avxemu_test_exe(nativetest SOURCES nativetest.c LINK avxemu_core avxemu_asm)
 add_test(NAME nativetest COMMAND $<TARGET_FILE:nativetest>)
 set_tests_properties(nativetest PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
-# The opt-in (AVXEMU_MINSPILL) live-register BMI thunks, each against bmi_exec. Hermetic: the
-# emitted code is base-ISA only, and AVXEMU_DISABLE keeps the constructor out (the test sets up
-# the pool itself).
+# The live-register BMI thunks (AVXEMU_MINSPILL, on by default), each against bmi_exec, and
+# which tier each setting selects. Hermetic: the emitted code is base-ISA only, and
+# AVXEMU_DISABLE keeps the constructor out (the test sets up the pool itself).
 avxemu_test_exe(minspilltest SOURCES minspilltest.c minspill_harness.s LINK avxemu_core avxemu_asm)
-add_test(NAME minspilltest COMMAND $<TARGET_FILE:minspilltest>)
-set_tests_properties(minspilltest PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
+add_test(NAME minspilltest COMMAND $<TARGET_FILE:minspilltest> on)
+add_test(NAME minspilltest-off COMMAND env AVXEMU_MINSPILL=0 $<TARGET_FILE:minspilltest> off)
+set_tests_properties(minspilltest minspilltest-off PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
 # Links avxemu into itself so the load-time passes act on its own cpuid, lzcnt and AVX2 run:
 # the analysis cache records them, replays them identically, and refuses bad files.
@@ -95,8 +96,9 @@ avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
 set_tests_properties(run-wrapper inject memtest tramptest overread reloctest nativetest
-                     minspilltest cachetest zcnt16 selftest linkhook linkhook-no-rebind
-                     inerttest inerttest-assume-capable threadtest overread-fault guard-page
+                     minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
+                     linkhook-no-rebind inerttest inerttest-assume-capable threadtest
+                     overread-fault guard-page
   PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 
 avxemu_objects(t_refdigest refdigest.c cpu.c)

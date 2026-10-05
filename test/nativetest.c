@@ -336,6 +336,11 @@ int main(void){
     /* aliasing: dhi==src (src loaded before dhi slot written); dlo==rdx-slot */
     { gprset g[]={ {2,0x00000000FEDCBA98ull}, {5,0x0000000012345678ull} };        tramp_insn t[]={TI(mk_mulx(1,5,5,64))}; run_case_bmi("mulx rcx,rbp,rbp dhi==src     (64)", t,1,g,2,FIN); }
     { gprset g[]={ {2,0x00000000ABCDEF01ull}, {6,0x0000000076543210ull} };        tramp_insn t[]={TI(mk_mulx(2,3,6,64))}; run_case_bmi("mulx rdx,rbx,rsi dlo==rdx     (64)", t,1,g,2,FIN); }
+    /* aliasing: dlo==dhi (`mulx rax,rax,rax`-style, which real code uses to take just the
+     * high half): low is written first, high last, so the register must keep the HIGH half */
+    { gprset g[]={ {2,0xFEDCBA9876543210ull}, {5,0x0123456789ABCDEFull} };       tramp_insn t[]={TI(mk_mulx(3,3,5,64))}; run_case_bmi("mulx rbx,rbx,rbp dlo==dhi     (64)", t,1,g,2,FIN); }
+    { gprset g[]={ {3,~0ull},{2,0xDEADBEEFFFFFFFFFull},{5,0x00000003u} };         tramp_insn t[]={TI(mk_mulx(3,3,5,32))}; run_case_bmi("mulx ebx,ebx,ebp dlo==dhi     (32)", t,1,g,3,FIN); }
+    { gprset g[]={ {0,0xFFFFFFFFFFFFFFFFull}, {2,0x8000000000000001ull} };       tramp_insn t[]={TI(mk_mulx(0,0,0,64))}; run_case_bmi("mulx rax,rax,rax all alias   (64)", t,1,g,2,FIN); }
     /* high regs (REX.B on the mul r/m and slots) */
     { gprset g[]={ {2,0x00000000DEADBEEFull}, {11,0x00000000CAFEBABEull} };       tramp_insn t[]={TI(mk_mulx(10,12,11,64))}; run_case_bmi("mulx r10,r12,r11 (64,REX)",       t,1,g,2,FIN); }
 

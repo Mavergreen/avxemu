@@ -59,6 +59,8 @@ faulting address.
 | `AVXEMU_SELFTEST=1` | check trap → decode → emulate → writeback on this CPU, then exit |
 | `AVXEMU_DISABLE=1` | bypass the emulator entirely |
 | `AVXEMU_NO_REBIND=1` | when linked rather than inserted, skip rebinding `sigaction`/`signal` |
+| `AVXEMU_MINSPILL=0` | turn off the minimal-spill tier, a live-register thunk for a single register-operand BMI op (on by default) |
+| `AVXEMU_NATIVE=0` | turn off the generated native thunks, vector and scalar BMI, MULX included (on by default) |
 | `AVXEMU_FORCETRAMP=1`, `AVXEMU_FORCEPATCH=1` | tests only: force trampolining or lzcnt patching on an AVX2 CPU |
 
 **The risk the tests don't remove:** an emulation that is wrong in a way the oracles never

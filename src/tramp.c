@@ -1673,9 +1673,9 @@ void *avxemu_emit_minspill_block(const decoded *d, uint64_t resume){
     return blk;
 }
 
-/* AVXEMU_MINSPILL: opt-in (default OFF) for the Phase-1a hypothesis A/B. Flipped
- * on only after the gate confirms the per-op-spill hypothesis. */
-static int minspill_enabled(void){ const char *e = getenv("AVXEMU_MINSPILL"); return e && e[0] != '0'; }
+/* AVXEMU_MINSPILL: on by default; AVXEMU_MINSPILL=0 turns it off, falling back to
+ * the selection below it (native, then C dispatch). */
+static int minspill_enabled(void){ const char *e = getenv("AVXEMU_MINSPILL"); return !(e && e[0] == '0'); }
 
 /* Minimal-spill thunk for a single supported op (lzcnt / shlx). Returns the entry,
  * or 0 (caller falls back to the existing full-spill selection — no regression).
@@ -1756,39 +1756,42 @@ static long emit_run(uint8_t *text, size_t fstart, size_t fend,
     return 0;
 }
 
+/* Pick the thunk tier for the run ri[0..rn), which resumes at res, and build it in
+ * the pool. NULL if none could be built. Non-static so minspilltest can check which
+ * tier each AVXEMU_MINSPILL setting selects. */
+void *avxemu_select_thunk(const tramp_insn *ri, int rn, uint64_t res) {
+    /* AVXEMU_MINSPILL (default ON): a minimal-spill live-register thunk for a single
+     * supported register-operand BMI op -- highest priority. On NULL (gate off, not a
+     * single supported op, an rsp operand, or pool exhausted) fall through to the
+     * selection below. AVXEMU_MINSPILL=0 gives exactly that selection. */
+    void *thunk = (minspill_enabled() && !g_force_full)
+                      ? avxemu_build_thunk_minspill(ri, rn, res) : 0;
+    /* Milestone B: register-resident native-SSE thunk (gated by AVXEMU_NATIVE,
+     * default ON). NULL -> fall back to the existing C-dispatch selection. */
+    if (!thunk) thunk = g_force_full ? 0 : avxemu_build_thunk_native(ri, rn, res);
+    /* Task 2: scalar-GPR native (register-only LZCNT, MULX) via the tt2 thunk, also
+     * gated by AVXEMU_NATIVE. The vector native attempt above declines BMI ops, so
+     * this runs next. NULL (gate off, op outside the scalar set, or pool exhausted)
+     * -> existing C thunk selection. No correctness risk. */
+    if (!thunk && !g_force_full && run_is_native_bmi(ri, rn))
+        thunk = avxemu_build_thunk_native_bmi(ri, rn, res);
+    if (!thunk)
+        thunk = g_force_full              ? avxemu_build_thunk(ri, rn, res)
+              : run_is_regonly_bmi(ri, rn) ? build_thunk_bmi(ri, rn, res)
+              : run_is_gpr_only(ri, rn)    ? build_thunk_gpr(ri, rn, res)
+              :                              avxemu_build_thunk(ri, rn, res);
+    return thunk;
+}
+
 /* Build the thunk for the run ri[0..rn), which starts at site_off and resumes at
  * re (both relative to text), and point the site at it. Returns 1 if patched.
  * The analysis (emit_run) and the lcache replay (replay_runs) both end here, so
- * a replayed trampoline is the one the analysis would have built. */
+ * a replayed trampoline is the one the analysis would have built. The site was
+ * already chosen branch-target-safe by the caller. */
 static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_off, size_t re) {
     {
         uint64_t res = (uint64_t)(text + re);
-        /* Milestone B: try the register-resident native-SSE thunk first (gated by
-         * AVXEMU_NATIVE, default ON). On NULL — op outside the supported set, a
-         * segment/mem-dest operand, pool exhausted, or gate off — fall back to the
-         * existing C-dispatch thunk selection (full/gpr/bmi). No correctness risk. */
-        /* Phase 1a (AVXEMU_MINSPILL, default OFF): a minimal-spill live-register
-         * thunk for a single supported lzcnt — highest priority when enabled. On
-         * NULL (gate off, not a single supported lzcnt, rsp operand, or pool
-         * exhausted) fall through to the existing selection. With the env unset,
-         * minspill_enabled() is false => behavior byte-identical to before. The
-         * site `s` was already chosen branch-target-safe by the loop above. */
-        void *thunk = (minspill_enabled() && !g_force_full)
-                          ? avxemu_build_thunk_minspill(ri, rn, res) : 0;
-        /* Milestone B: register-resident native-SSE thunk (gated by AVXEMU_NATIVE,
-         * default ON). NULL -> fall back to the existing C-dispatch selection. */
-        if (!thunk) thunk = g_force_full ? 0 : avxemu_build_thunk_native(ri, rn, res);
-        /* Task 2: scalar-GPR native (register-only LZCNT) via the tt2 thunk. The
-         * vector native attempt above declines BMI ops, so this runs next. NULL
-         * (gate off, op outside the scalar set, or pool exhausted) -> existing C
-         * thunk selection. No correctness risk. */
-        if (!thunk && !g_force_full && run_is_native_bmi(ri, rn))
-            thunk = avxemu_build_thunk_native_bmi(ri, rn, res);
-        if (!thunk)
-            thunk = g_force_full              ? avxemu_build_thunk(ri, rn, res)
-                  : run_is_regonly_bmi(ri, rn) ? build_thunk_bmi(ri, rn, res)
-                  : run_is_gpr_only(ri, rn)    ? build_thunk_gpr(ri, rn, res)
-                  :                              avxemu_build_thunk(ri, rn, res);
+        void *thunk = avxemu_select_thunk(ri, rn, res);
         if (thunk) {
             uint8_t *site = text + site_off;
             int64_t rel = (int64_t)((uint8_t *)thunk - (site + 5));
