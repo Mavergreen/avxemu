@@ -8,8 +8,9 @@ shipyard-cmake --build --preset native
 shipyard-ctest --preset native
 ```
 
-Done when ctest prints `100% tests passed`. Skips are fine. In CI the build takes about 15 s and
-the tests about 5 s.
+Done when ctest prints `100% tests passed`. Skips are fine. On the 10.9 machine (a 6-core Xeon
+E5-1650 v2), measured on 2026-10-05, a clean configure and build takes about 11 s, and the
+suite about 12 s, most of it `threadtest`.
 
 `shipyard-cmake` comes from [shipyard](https://github.com/Mavergreen/shipyard). The build is
 out of tree: `libavxemu.dylib` lands in `$TMPDIR/mm-build/<checkout>-<preset>/`.
@@ -50,6 +51,9 @@ The first thing to run on a new machine, without Claude Code. It prints PASS or 
 AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=/usr/local/mavergreen/avxemu/lib/libavxemu.dylib /usr/bin/true
 ```
 
+On macOS newer than 10.9, name a program of your own instead of `/usr/bin/true`: SIP strips
+`DYLD_INSERT_LIBRARIES` from system binaries.
+
 The dylib is silent in normal use. A `#UD` it can't emulate is chained to the program's own
 handler, so a coverage gap shows up as Bun's "illegal instruction" crash report, with the
 faulting address.
@@ -59,18 +63,24 @@ faulting address.
 | `AVXEMU_SELFTEST=1` | check trap → decode → emulate → writeback on this CPU, then exit |
 | `AVXEMU_DISABLE=1` | bypass the emulator entirely |
 | `AVXEMU_NO_REBIND=1` | when linked rather than inserted, skip rebinding `sigaction`/`signal` |
+| `AVXEMU_NOCACHE=1` | analyse at every launch: neither read nor write the load-time cache |
+| `AVXEMU_CACHE_DIR=<dir>` | keep the load-time cache there instead of `~/Library/Caches/avxemu` |
+| `AVXEMU_CACHE_STATS=1` | report whether this launch hit, missed or refused the cache |
 | `AVXEMU_MINSPILL=0` | turn off the minimal-spill tier, a live-register thunk for a single register-operand BMI op (on by default) |
 | `AVXEMU_NATIVE=0` | turn off the generated native thunks, vector and scalar BMI, MULX included (on by default) |
 | `AVXEMU_FORCETRAMP=1`, `AVXEMU_FORCEPATCH=1` | tests only: force trampolining or lzcnt patching on an AVX2 CPU |
+| `AVXEMU_ASSUME_CAPABLE=1` | tests only: stay inert, as on a CPU that has everything |
 
 **The risk the tests don't remove:** an emulation that is wrong in a way the oracles never
-exercised corrupts results silently. The defences are the exhaustive differential oracles, the
-check that forced-trampolined output is byte-identical to native, and `AVXEMU_SELFTEST` on the
-target.
+exercised corrupts results silently. The defences are the exhaustive differential oracles and
+`AVXEMU_SELFTEST` on the target. The check that forced-trampolined output is byte-identical to
+native, the `claude-trampoline` test, skips on both release hosts today, so it is not exercised
+now: the 10.9 machine has no AVX2 to run the native side, and macOS 15 places no trampoline.
 
 ## How it works
 
-A load-time constructor arms four mechanisms.
+On a CPU that already has AVX2, FMA, BMI1, BMI2, LZCNT, F16C and MOVBE, the load-time
+constructor returns at once, and avxemu stays inert. Anywhere else it arms four mechanisms.
 
 1. **Trampolines, the fast path.** Before the program runs, avxemu scans the main executable's
    `__text`, guided by `LC_FUNCTION_STARTS`. It rewrites each run of faulting instructions into
@@ -153,8 +163,10 @@ Per emulated instruction, measured on Haswell:
 End to end, on a real CPU-bound `claude` launch:
 
 - **Steady-state execution:** about 1.2× native. AVX2 is a thin slice of what runs.
-- **Startup:** a one-time scan of about 1 s per launch, walking 60 MB of `__text`.
-- **A short command:** `claude --help` is about 4× slower, because the scan dominates.
+- **Startup:** the first launch of a given binary analyses its 60 MB of `__text`, about 2.2 s
+  for Claude Code on an Ivy Bridge. That launch records the result in `~/Library/Caches/avxemu`
+  (`src/lcache.c`), and later launches replay it in about 0.04 s. A replay checks every recorded
+  site against the bytes there, and analyses afresh on any mismatch.
 - **SIMD-heavy bursts:** slower than that.
 
 Only a native build without AVX2 beats this.
@@ -167,7 +179,9 @@ Only a native build without AVX2 beats this.
   corpus caught two crash bugs random testing missed (`0x67`-padded VEX, `MOVBE` store) and a
   BMI2 memory-operand width bug.
 - **lzcnt/tzcnt patch:** 5,158 sites patched, each checked `F3`→`F0` and a real zcnt.
-- **Trampolines:** forced-trampolined output is byte-identical to native.
+- **Trampolines:** forced-trampolined output was byte-identical to native where a trampoline
+  could be placed. Its test, `claude-trampoline`, skips on both release hosts today (see
+  "Debugging"), so this is not re-checked now.
 - **On a real Ivy Bridge Mac:** the AVX1 signal-frame layout, coexistence with Bun's handlers,
   and end-to-end use. The decisive bug found there: the thunk used `sub` to set up its frame,
   which clobbered the flags before saving them, so a branch after a scheduled `vpbroadcast` went
@@ -182,6 +196,7 @@ Only a native build without AVX2 beats this.
 | `decode.c`, `lde.c` | instruction decoder; length decoder and recursive-descent scanner |
 | `exec.c`, `exec_bmi.c`, `softfma.c` | the SSE-only emulator core |
 | `tramp.c`, `tramp.s`, `reloc.c` | trampoline scanner, installer and thunk template; runtime relocation of trapping sites |
+| `lcache.c` | the load-time cache: records the load-time passes' result, replays it |
 | `handler.c`, `patch_mem.c` | the constructor, signal handlers, lzcnt/tzcnt patcher |
 | `selftest.c`, `selftest.s` | `AVXEMU_SELFTEST` |
 
@@ -199,6 +214,10 @@ holds mnemonic strings for diagnostics.
 | `fuzz.c` | native vs emulated, full 16-`ymm` compare |
 | `tramptest.c`, `memtest.c`, `inject.c` | thunks, every addressing mode, fault injection end to end |
 | `overread*.c`, `guard_page.c` | over-read fixup, and that guard pages stay untouched |
+| `threadtest.c` | runtime relocation while other threads run the same sites |
+| `inerttest.c`, `linkhook.c` | inert on a capable CPU; keeping `SIGILL` when linked, not inserted |
+| `cachetest.c` | the load-time cache: record, replay, identical result, bad files refused |
+| `nativetest.c`, `minspilltest.c` | the generated native and minimal-spill thunks vs the C emulator |
 
 **The rest:** `packaging/build-pkg.sh` builds the `.pkg` with shipyard, `contrib/` holds scripts
 for consumers (`extract-libavxemu.sh`), and `.github/workflows/` holds CI.

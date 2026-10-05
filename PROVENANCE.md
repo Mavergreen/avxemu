@@ -27,12 +27,15 @@ unreachable objects pruned. Verified by tree identity, not by inspection:
 `main` is upstream `6ead179`, then this repo's own build, tests and packaging. Release
 `20260908.1` ships this code unchanged.
 
-The maintainer's unreleased follow-up work lands in later releases, starting with release 2:
-nine fixes, run on a 10.9 machine since September (load-time fixes, thread-safe live
-patching, hermetic tests on CPUs without AVX2, a load-time analysis cache, and fixes found
-running the suite on an AVX2 Mac). A speedup for register-resident BMI was held back at
-first, because Claude Code's hot path uses memory operands, which it declines; it lands too,
-on by default (`AVXEMU_MINSPILL=0` turns it off).
+Release `20261005.1` carries the maintainer's follow-up work: nine fixes, run on a 10.9
+machine since September (load-time fixes, thread-safe live patching, hermetic tests on CPUs
+without AVX2, a load-time analysis cache, and fixes found running the suite on an AVX2 Mac).
+One more fix was folded into "stay inert on a CPU that already has everything we emulate"
+during the replay, so that every commit passes on an AVX2 Mac too: the test programs that
+drive the `SIGILL` handler install it on any CPU. The release also carries a speedup for
+register-resident BMI. It was held back at first because Claude Code's hot path uses memory
+operands, which it declines, not for any known defect, and it is on by default
+(`AVXEMU_MINSPILL=0` turns it off).
 
 ## Licensing
 

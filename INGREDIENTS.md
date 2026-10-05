@@ -70,8 +70,9 @@ with silicon.
 
 CI builds with the runner image's clang, which can change from one run to the next, so the
 dylib a release ships has not been through the checks above. Run it on the 10.9 machine before
-the release is dispatched. The nightly reconcile dispatches a bump by itself, so bring a bump
-in by pull request and take that pull request's green run; otherwise take `main`'s.
+the release is dispatched. Push the bump to `main`, take that push build's green run for the
+check below, and dispatch before the nightly reconcile at 06:41 UTC: it is the backstop that
+would otherwise publish the bump unchecked.
 
     gh run download <run-id> -R Mavergreen/avxemu -n avxemu -D avxemu-run
     sh contrib/extract-libavxemu.sh avxemu-run/avxemu-<version>.pkg avxemu-run
@@ -96,14 +97,16 @@ not link avxemu, or two copies load and the one under test may not be the one th
 The library list shows this directory's `libavxemu.dylib`, the version prints, and the reply
 comes back.
 
-Record the result in the release's notes file:
+Record the result in the release's notes file, in the words the notes use:
 
-    Checked before release on Mac OS X 10.9 without AVX2: this build's `libavxemu.dylib`
-    (sha256 `<sha256>`) targets 10.9, passes `AVXEMU_SELFTEST` and runs Claude Code <version>.
+    Checked on Mac OS X 10.9 without AVX2: the released `libavxemu.dylib` passes its self-test
+    (`AVXEMU_SELFTEST`) and runs Claude Code. Its `hardware` tests pass on an Intel Mac with AVX2,
+    FMA and BMI.
 
+The sha256 is not written into the notes: it is checked during the 10.9 run. Note it there.
 After the dispatch, extract the published `.pkg`'s dylib the same way: its sha256 must be the
-one recorded. If it is not, the runner image moved between the runs; check the published dylib
-the same way and correct the release's notes.
+one noted. If it is not, the runner image moved between the runs; check the published dylib
+the same way, and if it fails, the release is pulled.
 
 If a release ships ahead of the 10.9 run, the run happens immediately after publishing, on the
 published release's dylib: its sha256 must match the CI artifact's, and if the run fails, the

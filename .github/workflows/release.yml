@@ -139,6 +139,13 @@ jobs:
           sh "$SHIPYARD_SCRIPTS/artifact-facts.sh" "$BUILD/dist" "${{ steps.ver.outputs.ver }}" \
             | sh "$SHIPYARD_SCRIPTS/check-artifact-conformance.sh"
 
+      - name: The feed is an upgrade on its line
+        if: steps.ver.outputs.publish == 'yes'
+        run: |
+          set -eu
+          sh "$SHIPYARD_SCRIPTS/assert_appcast_upgradeable.sh" --appcast "$BUILD/dist/avxemu.xml" \
+            --version "${{ steps.ver.outputs.ver }}" --tag-glob '[0-9]*.[0-9]*'
+
       - name: The build must not have written into the source tree
         run: sh "$SHIPYARD_SCRIPTS/assert-tree-clean.sh"
 

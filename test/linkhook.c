@@ -13,7 +13,7 @@
  * under DYLD_INSERT_LIBRARIES would test dyld's interposition instead of ours.
  *
  * Host-agnostic: it never executes an AVX2 instruction. On a CPU that has
- * everything avxemu stays inert (inerttest), so build.sh runs this with
+ * everything avxemu stays inert (inerttest), so its ctests run this with
  * AVXEMU_FORCEPATCH=1, which keeps it installed; "did our registration replace
  * it?" is then a meaningful question on an AVX2 oracle box too. AVXEMU_NO_REBIND=1 is the
  * negative control — with the rebind off, the registration MUST get through.
