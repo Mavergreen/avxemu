@@ -40,6 +40,10 @@ the instructions.
 
 - `overread-fault` is marked `--fails-when rosetta`. Under Rosetta the fault handler does not
   repair the straddling read. Cause not yet diagnosed.
+- `cachetest` is marked `--fails-when rosetta`. Under Rosetta, the three checks that compare
+  code bytes between processes fail: the replayed `__text` and pool match the analysed ones, a
+  re-analysis after a corrupt file reaches the same result, and 8 simultaneous cold starts
+  agree. Its other checks pass there. Cause not yet diagnosed.
 
 A marked test that starts passing fails with `UNEXPECTED PASS`. Remove its mark.
 
