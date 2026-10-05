@@ -46,7 +46,7 @@ set_tests_properties(nativetest PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
 # Links avxemu into itself so the load-time passes act on its own cpuid, lzcnt and AVX2 run:
 # the analysis cache records them, replays them identically, and refuses bad files.
-avxemu_test_exe(cachetest SOURCES cachetest.c cachetest.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(cachetest SOURCES cachetest.c cachetest.s LINK avxemu_core avxemu_asm t_cpu)
 add_test(NAME cachetest COMMAND $<TARGET_FILE:cachetest>)
 
 avxemu_objects(t_zcnt "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/exec_bmi.c" "${PROJECT_SOURCE_DIR}/src/names.c")
@@ -70,14 +70,14 @@ add_test(NAME linkhook-no-rebind COMMAND env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIN
 
 # Linked on a CPU that has everything, avxemu stays inert. The plain run checks the real early
 # return on such a CPU, and on one without is the negative control: avxemu must be installed.
-avxemu_test_exe(inerttest FLAGS -O0 SOURCES inerttest.c)
+avxemu_test_exe(inerttest FLAGS -O0 SOURCES inerttest.c LINK t_cpu)
 target_link_libraries(inerttest PRIVATE avxemu)
 add_test(NAME inerttest COMMAND $<TARGET_FILE:inerttest>)
 add_test(NAME inerttest-assume-capable COMMAND env AVXEMU_ASSUME_CAPABLE=1 $<TARGET_FILE:inerttest>)
 
 # Linked against the dylib, like linkhook: the production configuration. N threads race each
 # site's runtime relocation. It skips itself on a CPU with AVX2, where the loop never faults.
-avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.s)
+avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.s LINK t_cpu)
 target_link_libraries(threadtest PRIVATE avxemu)
 add_test(NAME threadtest COMMAND $<TARGET_FILE:threadtest> 20 12)
 

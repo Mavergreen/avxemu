@@ -28,11 +28,12 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
+#include "cpu.h"
 
 extern const uint8_t tt_body_start[], tt_body_site[], tt_body_end[];
 extern void  *avxemu_pool_base(void);
 extern void   avxemu_patch_safe_test_region(uint8_t *base, size_t size);
-extern void   avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]);
 
 #define MAXTHREADS 64
 #define NFUNCS   256
@@ -106,13 +107,39 @@ static int trial(void) {
     return 0;
 }
 
+/* The site's own instruction, once, for the probe below. */
+static void probe_site(void) {
+    __asm__ volatile(".byte 0xC5, 0xFD, 0xFA, 0xC1\n\tvzeroupper" ::: "xmm0", "xmm1");   /* vpsubd ymm1,ymm0,ymm0 */
+}
+
+/* Does the site fault here? Not inferred from a feature bit: a CPU, or a translator, decides
+ * what it runs. Asked by running it once in a child with avxemu disabled, where a #UD can
+ * only kill it. */
+static int site_faults(void) {
+    char self[1024]; uint32_t sz = sizeof self;
+    if (_NSGetExecutablePath(self, &sz)) return -1;
+    fflush(0);
+    pid_t p = fork();
+    if (p == 0) {
+        setenv("AVXEMU_DISABLE", "1", 1);
+        execl(self, self, "--probe", (char *)0);
+        _exit(127);
+    }
+    int st = 0;
+    if (p < 0 || waitpid(p, &st, 0) != p) return -1;
+    if (WIFSIGNALED(st) && WTERMSIG(st) == SIGILL) return 1;
+    if (WIFEXITED(st) && WEXITSTATUS(st) == 0) return 0;
+    return -1;
+}
+
 int main(int argc, char **argv) {
-    /* On a CPU with AVX2 the loop never faults, so nothing relocates and there
-     * is no race to run. Asked of the raw CPU: a plain cpuid here would be
-     * trapped and answered with the AVX2 avxemu advertises. */
-    uint32_t r[4];
-    avxemu_cpuid_raw(7, 0, r);
-    if (r[1] & (1u << 5)) { printf("threadtest: skipped, this CPU has AVX2\n"); return 77; }   /* ctest: SKIP */
+    if (argc == 2 && !strcmp(argv[1], "--probe")) { probe_site(); return 0; }
+    /* Where avxemu stays inert there is no pool and no handler; where the loop never faults,
+     * nothing relocates. Either way there is no race to run. */
+    if (cpu_avxemu_capable()) { printf("threadtest: skipped, avxemu stays inert on this CPU\n"); return 77; }
+    int f = site_faults();
+    if (f < 0) { fprintf(stderr, "threadtest: the fault probe failed\n"); return 2; }
+    if (!f) { printf("threadtest: skipped, the site does not fault here, so nothing relocates\n"); return 77; }
 
     int trials = argc > 1 ? atoi(argv[1]) : 20;
     if (argc > 2) g_nthreads = atoi(argv[2]);

@@ -43,6 +43,23 @@ RAW_CPUID unsigned cpu_features(void) {
     return f;
 }
 
+/*
+ * Does this CPU have everything avxemu emulates, so that avxemu stays inert on it? A copy, to
+ * the bit, of the CPU half of cpu_has_everything() in src/handler.c: FMA, MOVBE and F16C from
+ * leaf 1, BMI1, AVX2 and BMI2 from leaf 7, LZCNT from leaf 0x80000001, asked of the raw CPU
+ * with no OS (xgetbv) check. Keep the two in step.
+ */
+RAW_CPUID int cpu_avxemu_capable(void) {
+    unsigned a, b, c1, c8, d, b7 = 0, c, x;
+    if (!__get_cpuid(1, &a, &b, &c1, &d)) return 0;
+    if (__get_cpuid_max(0, 0) >= 7) __cpuid_count(7, 0, a, b7, c, d);
+    if (!__get_cpuid(0x80000001u, &a, &x, &c8, &d)) return 0;
+    const unsigned l1  = (1u<<12) | (1u<<22) | (1u<<29);   /* FMA, MOVBE, F16C */
+    const unsigned l7  = (1u<<3)  | (1u<<5)  | (1u<<8);    /* BMI1, AVX2, BMI2 */
+    const unsigned l81 = (1u<<5);                           /* LZCNT */
+    return (c1 & l1) == l1 && (b7 & l7) == l7 && (c8 & l81) == l81;
+}
+
 int cpu_translated(void) {
     const char *forced = getenv("AVXEMU_TEST_TRANSLATED");
     if (forced && strcmp(forced, "1") == 0) return 1;

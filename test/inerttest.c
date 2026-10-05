@@ -21,17 +21,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "cpu.h"
 
 /* A cpuid in our own __text, where avxemu's cpuid pass would rewrite it. */
 __asm__(".text\n.globl _probe_cpuid\n_probe_cpuid:\n cpuid\n ret\n");
 extern const uint8_t probe_cpuid[];
-extern void avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]);
 
 int main(void) {
     int assume = getenv("AVXEMU_ASSUME_CAPABLE") != 0;
-    uint32_t r[4];
-    avxemu_cpuid_raw(7, 0, r);
-    int real = (r[1] & (1u << 5)) != 0;   /* AVX2; every AVX2 CPU has the rest too */
+    /* avxemu's own predicate, all seven features, not AVX2 alone: a CPU (or a translator)
+     * can report AVX2 without, say, MOVBE, and there avxemu installs. */
+    int real = cpu_avxemu_capable();
     struct sigaction cur;
     sigaction(SIGILL, 0, &cur);
     int handler_ours = cur.sa_handler != SIG_DFL;
