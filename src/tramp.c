@@ -11,7 +11,7 @@
 #include "vexops.h"
 #include "lde.h"
 #include "lcache.h"
-#include "image.h"
+#include "platform/darwin/image.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>

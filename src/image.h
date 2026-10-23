@@ -1,14 +1,35 @@
-/*
- * image.h — which loaded image is the program avxemu is patching.
- */
+/* Immutable executable metadata, prepared before installing signal handlers. */
 #ifndef AVXEMU_IMAGE_H
 #define AVXEMU_IMAGE_H
+#include <stddef.h>
 #include <stdint.h>
-#include <mach-o/loader.h>
+#include "platform/memory.h"
 
-/* The main executable (MH_EXECUTE), its slide, and its path (either may be
- * NULL). Not dyld image 0: on dyld newer than 10.9's, while an INSERTED
- * library's initializers run, image 0 is that library -- avxemu would patch
- * itself and leave the program untouched. NULL if there is none. (handler.c) */
-const struct mach_header_64 *avxemu_main_image(intptr_t *slide, const char **name);
+typedef struct {
+    uint8_t *base;
+    uint64_t vaddr;
+    size_t size, readable;
+    unsigned prot;
+} avxemu_code_range;
+typedef struct {
+    uint32_t range;
+    size_t begin, end;
+} avxemu_function;
+typedef struct {
+    const avxemu_code_range *ranges;
+    size_t nranges;
+    const avxemu_function *functions;
+    size_t nfunctions;
+    const char *path;
+} avxemu_image;
+/* Initialization may allocate; failure publishes no image. */
+int avxemu_image_init(void);
+const avxemu_image *avxemu_image_main(void);
+/* Allocation-free, handler-safe queries. Ranges are ordered by vaddr (and
+ * loaded address), disjoint and nonempty; functions by (range, begin).
+ * Bounds are half-open. Failure leaves output arguments unchanged. */
+int avxemu_image_find(const avxemu_image *image, uintptr_t address,
+                      size_t size, uint32_t *range, size_t *offset);
+const avxemu_function *avxemu_image_function(const avxemu_image *image,
+                                             uintptr_t address);
 #endif

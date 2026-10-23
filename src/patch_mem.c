@@ -24,7 +24,7 @@
 
 extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
 #include "lcache.h"
-#include "image.h"
+#include "platform/darwin/image.h"
 
 static void emit(const char *s){ (void)write(2, s, strlen(s)); }
 

@@ -21,7 +21,6 @@
 #include <fcntl.h>       /* open() in faulthist_dump */
 #include <stdio.h>       /* rename() in faulthist_dump */
 #include <mach/mach.h>
-#include <mach/mach_time.h>  /* mach_absolute_time() in faultsnap_dump */
 #include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -33,6 +32,8 @@
 #include "regfile.h"
 #include "lcache.h"
 #include "image.h"
+#include "platform/host.h"
+#include "platform/darwin/image.h"
 #include "platform/memory.h"
 
 static struct sigaction g_old;
@@ -119,7 +120,7 @@ static void faultsnap_dump(uint64_t rip, _STRUCT_X86_THREAD_STATE64 *ss){
     if (fd < 0) return;
     /* seq + monotonic time in the header so recurrence ACROSS the run is measurable */
     (void)write(fd, "--- snap ", 9); fh_u64(fd, g_faultsnap_total);
-    (void)write(fd, " t ", 3); fh_u64(fd, mach_absolute_time());
+    (void)write(fd, " t ", 3); fh_u64(fd, avxemu_host_ticks());
     (void)write(fd, " rip ", 5); fh_hex(fd, rip); (void)write(fd, "\n", 1);
     for (int i = 0; i < 16; i++){
         uint64_t v = *gpr_ptr(ss, i);
@@ -411,35 +412,12 @@ int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
     return 1;
 }
 
-const struct mach_header_64 *avxemu_main_image(intptr_t *slide, const char **name) {
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64 || mh->filetype != MH_EXECUTE) continue;
-        if (slide) *slide = _dyld_get_image_vmaddr_slide(i);
-        if (name)  *name  = _dyld_get_image_name(i);
-        return mh;
-    }
-    return 0;
-}
-
 static void avxemu_patch_cpuid(void){
-    intptr_t slide;
-    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
-    if (!mh) return;
-    uint64_t text_addr=0, text_size=0;
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    for (uint32_t i=0;i<mh->ncmds;i++){
-        if (lc->cmd==LC_SEGMENT_64){
-            const struct segment_command_64 *sg=(const struct segment_command_64 *)lc;
-            if (!strcmp(sg->segname,"__TEXT")){
-                const struct section_64 *s=(const struct section_64 *)(sg+1);
-                for (uint32_t j=0;j<sg->nsects;j++) if(!strcmp(s[j].sectname,"__text")){ text_addr=s[j].addr; text_size=s[j].size; }
-            }
-        }
-        lc=(const struct load_command *)((const char *)lc+lc->cmdsize);
-    }
-    if (!text_addr) return;
-    uint8_t *text=(uint8_t *)(text_addr+slide), *end=text+text_size;
+    const avxemu_image *image = avxemu_image_main();
+    if (!image || image->nranges != 1) return;
+    const avxemu_code_range *range = &image->ranges[0];
+    uint64_t text_size = range->size;
+    uint8_t *text = range->base, *end = text + text_size;
     uintptr_t lo=(uintptr_t)text & ~(uintptr_t)0xfff, hi=((uintptr_t)text+text_size+0xfff)&~(uintptr_t)0xfff;
     /* stays executable while writable: see avxemu_patch_lzcnt */
     if (vm_protect(mach_task_self(),(vm_address_t)lo,(vm_size_t)(hi-lo),FALSE,
@@ -722,26 +700,7 @@ __attribute__((used)) static const struct { const void *r, *o; }
 static const struct mach_header_64 *avxemu_self_header(void) {
     static const struct mach_header_64 *self;
     static int done;
-    if (done) return self;
-    done = 1;
-    const uintptr_t me = (uintptr_t)&avxemu_self_header;
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const struct mach_header_64 *mh =
-            (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64) continue;
-        const intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        const struct load_command *lc = (const struct load_command *)(mh + 1);
-        for (uint32_t c = 0; c < mh->ncmds; c++) {
-            if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *sg =
-                    (const struct segment_command_64 *)lc;
-                const uintptr_t lo = (uintptr_t)sg->vmaddr + (uintptr_t)slide;
-                if (me >= lo && me < lo + (uintptr_t)sg->vmsize) { self = mh; break; }
-            }
-            lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-        }
-        if (self) break;
-    }
+    if (!done) { self = avxemu_darwin_self_image(); done = 1; }
     return self;
 }
 
@@ -854,6 +813,7 @@ __attribute__((constructor))
 static void avxemu_install(void) {
     if (getenv("AVXEMU_DISABLE")) return;     /* opt-out escape hatch */
     if (cpu_has_everything()) return;         /* nothing to emulate: stay inert */
+    if (!avxemu_image_init()) { emit("avxemu: cannot initialize executable metadata\n"); return; }
     if (!avxemu_page_size()) { emit("avxemu: cannot determine page size\n"); return; }
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);

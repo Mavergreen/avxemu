@@ -42,11 +42,8 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <mach-o/dyld.h>
-#include <mach-o/getsect.h>
-#include <mach-o/ldsyms.h>
-#include <crt_externs.h>
-#include <mach-o/loader.h>
 #include "lcache.h"
+#include "image.h"
 #include "cpu.h"
 
 extern uint32_t ct_cpuid7_ebx(void);
@@ -59,9 +56,11 @@ static uint64_t fnv(uint64_t h, const void *p, size_t n) {
 }
 
 static int child(void) {
-    unsigned long sz;
-    const uint8_t *text = getsectiondata((const struct mach_header_64 *)_NSGetMachExecuteHeader(),
-                                         "__TEXT", "__text", &sz);
+    if (!avxemu_image_init()) return 2;
+    const avxemu_image *image = avxemu_image_main();
+    if (!image || image->nranges != 1) return 2;
+    const uint8_t *text = image->ranges[0].base;
+    size_t sz = image->ranges[0].size;
     uint32_t v[8] __attribute__((aligned(32))) = {1, 2, 3, 4, 5, 6, 7, 8};
     ct_quadruple(v);
     int ok = (ct_cpuid7_ebx() & (1u << 5)) != 0      /* advertised AVX2: cpuid site patched */

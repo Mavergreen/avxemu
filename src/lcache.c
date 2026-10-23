@@ -42,14 +42,13 @@
 #include <dirent.h>
 #include <time.h>
 #include <sys/stat.h>
-#include <crt_externs.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
 
 extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
 
 #include "lcache.h"
 #include "image.h"
+#include "platform/host.h"
+#include <errno.h>
 
 int avxemu_lc_mode = LC_OFF;
 
@@ -76,85 +75,52 @@ static void say(const char *what) {
     if (n > 0) (void)write(2, b, (size_t)n);
 }
 
-static int image_uuid(const struct mach_header_64 *mh, uint8_t out[16]) {
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_UUID) { memcpy(out, ((const struct uuid_command *)lc)->uuid, 16); return 1; }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
-    return 0;
-}
-
-/* The image this code is in: avxemu's dylib, or the program when linked into it. */
-static const struct mach_header_64 *self_image(void) {
-    const uintptr_t me = (uintptr_t)&self_image;
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64) continue;
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        const struct load_command *lc = (const struct load_command *)(mh + 1);
-        for (uint32_t c = 0; c < mh->ncmds; c++) {
-            if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-                uintptr_t lo = (uintptr_t)sg->vmaddr + (uintptr_t)slide;
-                if (me >= lo && me < lo + (uintptr_t)sg->vmsize) return mh;
-            }
-            lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-        }
-    }
-    return 0;
-}
-
 static int settings_that_do_not_matter(const char *e) {
     return !strncmp(e, "AVXEMU_CACHE_DIR=", 17) || !strncmp(e, "AVXEMU_CACHE_STATS=", 19);
 }
 
 static int make_key(uint64_t text_vmaddr, uint64_t text_size) {
     memset(&g_key, 0, sizeof g_key);
-    const struct mach_header_64 *self = self_image();
-    const char *name = 0;
-    const struct mach_header_64 *exe = avxemu_main_image(0, &name);
-    if (!self || !exe) return 0;
-    if (!image_uuid(self, g_key.self_uuid)) return 0;
-    /* The program's own UUID is a bonus, not a requirement: the Mavericks
-     * wrapper's change_dylib -strip-lc removes LC_UUID from Claude Code to make
-     * header room. The file's identity below (device, inode, size, mtime to the
-     * nanosecond) is what pins the program; replay re-checks every site anyway. */
-    (void)image_uuid(exe, g_key.exe_uuid);
-    struct stat st;
-    if (!name || stat(name, &st) != 0) return 0;
-    g_key.exe_dev = (uint64_t)st.st_dev;   g_key.exe_ino = (uint64_t)st.st_ino;
-    g_key.exe_size = (uint64_t)st.st_size;
-    g_key.exe_mtime_s = (uint64_t)st.st_mtimespec.tv_sec;
-    g_key.exe_mtime_ns = (uint64_t)st.st_mtimespec.tv_nsec;
+    avxemu_file_identity self, exe;
+    if (!avxemu_host_identity(1, &self) || !avxemu_host_identity(0, &exe)) return 0;
+    /* Cache v1 stores Darwin UUID bytes; the next format can use the complete
+     * normalized build identity alongside multiple code ranges. */
+    memcpy(g_key.self_uuid, self.build_id, sizeof g_key.self_uuid);
+    memcpy(g_key.exe_uuid, exe.build_id, sizeof g_key.exe_uuid);
+    g_key.exe_dev = exe.dev; g_key.exe_ino = exe.ino; g_key.exe_size = exe.size;
+    g_key.exe_mtime_s = exe.mtime_s; g_key.exe_mtime_ns = exe.mtime_ns;
     g_key.text_vmaddr = text_vmaddr;       g_key.text_size = text_size;
     uint32_t r[4] = {0};
     if (avxemu_get_cpuid(1, 0, r)) g_key.cpu_l1ecx = r[2];
     r[1] = 0; if (avxemu_get_cpuid(7, 0, r)) g_key.cpu_l7ebx = r[1];
     r[2] = 0; if (avxemu_get_cpuid(0x80000001u, 0, r)) g_key.cpu_x1ecx = r[2];
     uint64_t h = FNV0;
-    for (char **e = *_NSGetEnviron(); e && *e; e++)
+    for (char **e = avxemu_host_environ(); e && *e; e++)
         if (!strncmp(*e, "AVXEMU_", 7) && !settings_that_do_not_matter(*e))
             h = fnv64(h, *e, strlen(*e) + 1);
     g_key.env_hash = h;
     return 1;
 }
 
+static int ensure_dir(const char *path) {
+    if (mkdir(path, 0700) == 0) return 1;
+    struct stat st;
+    return errno == EEXIST && stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 static int cache_dir(void) {
-    const char *d = getenv("AVXEMU_CACHE_DIR");
-    if (d && *d) {
-        if (snprintf(g_dir, sizeof g_dir, "%s", d) >= (int)sizeof g_dir) return 0;
-        mkdir(g_dir, 0700);
-        return 1;
+    if (!avxemu_host_cache_dir(g_dir, sizeof g_dir)) return 0;
+    char parent[sizeof g_dir];
+    memcpy(parent, g_dir, strlen(g_dir) + 1);
+    for (char *p = parent + 1; *p; p++) {
+        if (*p == '/') {
+            *p = 0;
+            int ok = ensure_dir(parent);
+            *p = '/';
+            if (!ok) return 0;
+        }
     }
-    const char *home = getenv("HOME");
-    if (!home || !*home) return 0;
-    char caches[1024];
-    if (snprintf(caches, sizeof caches, "%s/Library/Caches", home) >= (int)sizeof caches) return 0;
-    if (snprintf(g_dir, sizeof g_dir, "%s/avxemu", caches) >= (int)sizeof g_dir) return 0;
-    mkdir(caches, 0700);
-    mkdir(g_dir, 0700);
-    return 1;
+    return ensure_dir(g_dir);
 }
 
 static uint32_t body_sum(const void *body, size_t n) { return (uint32_t)fnv64(FNV0, body, n); }
@@ -189,34 +155,15 @@ static int load(void) {
     return ok;
 }
 
-/* The main image's __text, unslid: part of the key. */
-static int main_text(uint64_t *vmaddr, uint64_t *size) {
-    const struct mach_header_64 *mh = avxemu_main_image(0, 0);
-    if (!mh) return 0;
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-            const struct section_64 *sc = (const struct section_64 *)(sg + 1);
-            for (uint32_t j = 0; j < sg->nsects; j++)
-                if (!strcmp(sc[j].segname, "__TEXT") && !strcmp(sc[j].sectname, "__text")) {
-                    *vmaddr = sc[j].addr; *size = sc[j].size; return 1;
-                }
-        }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
-    return 0;
-}
-
 /* Called first thing in the constructor, before any pass. Sets avxemu_lc_mode. */
 void avxemu_lc_begin(void) {
     const char *s = getenv("AVXEMU_CACHE_STATS");
     g_stats = s && *s && *s != '0';
     avxemu_lc_mode = LC_OFF;
     if (getenv("AVXEMU_NOCACHE")) return;
-    uint64_t text_vmaddr, text_size;
-    if (!main_text(&text_vmaddr, &text_size)) return;
-    if (!make_key(text_vmaddr, text_size) || !cache_dir()) return;
+    const avxemu_image *image = avxemu_image_main();
+    if (!image || image->nranges != 1) return;   /* cache v1: one text range */
+    if (!make_key(image->ranges[0].vaddr, image->ranges[0].size) || !cache_dir()) return;
     uint64_t h = fnv64(FNV0, &g_key, sizeof g_key);
     if (snprintf(g_path, sizeof g_path, "%s/%016llx.avxc", g_dir, (unsigned long long)h) >= (int)sizeof g_path) return;
     if (load()) { avxemu_lc_mode = LC_REPLAY; return; }

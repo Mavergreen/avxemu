@@ -24,6 +24,16 @@ endfunction()
 
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
+avxemu_test_exe(image-contract SOURCES image_contract.c "${PROJECT_SOURCE_DIR}/src/image.c")
+add_test(NAME image-contract COMMAND $<TARGET_FILE:image-contract>)
+
+# Exercise metadata with emulator objects inside the executable and in a dylib.
+avxemu_test_exe(image-live SOURCES image_live.c LINK avxemu_core avxemu_asm)
+add_test(NAME image-live COMMAND $<TARGET_FILE:image-live> embedded)
+avxemu_test_exe(image-live-linked SOURCES image_live.c)
+target_link_libraries(image-live-linked PRIVATE avxemu)
+add_test(NAME image-live-linked COMMAND $<TARGET_FILE:image-live-linked> shared)
+
 avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
@@ -99,7 +109,7 @@ add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --becaus
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
-set_tests_properties(memory-contract run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(image-contract image-live image-live-linked memory-contract run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
                      linkhook-no-rebind inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page
