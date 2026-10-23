@@ -52,6 +52,15 @@ fail:
 /* Individual functions never cross executable range boundaries. */
 long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required, int recursive) {
     if (!image || !required) return 0;
+    if (avxemu_lc_mode == LC_REPLAY) {
+        const lc_byte *b; uint32_t n = avxemu_lc_bytes(&b);
+        int valid = 1;
+        for (uint32_t i = 0; i < n && valid; i++) {
+            const uint8_t *p = avxemu_lc_resolve(image, b[i].site, 1);
+            valid = p && *p == b[i].old;
+        }
+        if (!valid) avxemu_lc_invalid();
+    }
     long patched = 0;
     for (size_t ri = 0; ri < image->nranges; ri++) {
         const avxemu_code_range *range = &image->ranges[ri];
@@ -61,20 +70,15 @@ long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required, int r
         if (!saved) {
             avxemu_lc_rec_fail(); continue;
         }
-        if (avxemu_lc_mode == LC_REPLAY && image->nranges == 1) {
+        if (avxemu_lc_mode == LC_REPLAY) {
             const lc_byte *b; uint32_t n = avxemu_lc_bytes(&b);
-            int ok = 1;
-            for (uint32_t i = 0; i < n && ok; i++)
-                ok = b[i].off < range->size && text[b[i].off] == b[i].old;
-            if (ok) {
-                for (uint32_t i = 0; i < n; i++) text[b[i].off] = b[i].neu;
-                patched += (long)n;
-                avxemu_patch_write_end(saved, nsaved); continue;
+            for (uint32_t i = 0; i < n; i++) if (b[i].site.range == ri) {
+                text[(size_t)b[i].site.off] = b[i].neu; patched++;
             }
-            avxemu_lc_invalid();
+            avxemu_patch_write_end(saved, nsaved); continue;
         }
         uint8_t *before = 0;
-        if (avxemu_lc_mode == LC_RECORD && image->nranges == 1) {
+        if (avxemu_lc_mode == LC_RECORD) {
             before = malloc(range->size);
             if (before) memcpy(before, text, range->size);
             else avxemu_lc_rec_fail();
@@ -102,7 +106,10 @@ long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required, int r
         }
         if (before) {
             for (size_t i = 0; i < range->size; i++)
-                if (before[i] != text[i]) avxemu_lc_rec_byte((uint32_t)i, before[i], text[i]);
+                if (before[i] != text[i]) {
+                    lc_site site = {(uint32_t)ri, 0, i};
+                    avxemu_lc_rec_byte(site, before[i], text[i]);
+                }
             free(before);
         }
         avxemu_patch_write_end(saved, nsaved);

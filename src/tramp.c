@@ -1740,6 +1740,8 @@ void *avxemu_build_thunk_native_bmi(const tramp_insn *insns, int n, uint64_t res
 /* Place the trampoline for one gathered run of faulting instructions: pick the
  * first start whose 5-byte jmp can't corrupt a branch target, build a thunk for
  * [s,ni), and overwrite that start with `jmp thunk`. Returns 1 if patched. */
+/* Immutable metadata used by recording and runtime patch-safety checks. */
+static const avxemu_image *g_patch_image;
 static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_off, size_t re);
 static long emit_run(uint8_t *text, size_t fstart, size_t fend,
                      const tramp_insn *insns, const size_t *offs, int ni,
@@ -1757,7 +1759,11 @@ static long emit_run(uint8_t *text, size_t fstart, size_t fend,
         const tramp_insn *ri = insns + s; int rn = ni - s;
         if (g_nstats) nstats_tally(ri, rn);   /* AVXEMU_NATIVE_STATS diagnostic */
         if (place_run(text, ri, rn, offs[s], re)) {
-            avxemu_lc_rec_run((uint32_t)offs[s], (uint32_t)rn, (uint32_t)re);
+            uint32_t range; size_t off;
+            if (avxemu_image_find(g_patch_image, (uintptr_t)(text + offs[s]), 5, &range, &off)) {
+                lc_site site = {range, 0, off}, resume = {range, 0, re};
+                avxemu_lc_rec_run(site, (uint32_t)rn, resume);
+            } else avxemu_lc_rec_fail();
             return 1;
         }
     }
@@ -1989,9 +1995,6 @@ static int collect_branch_targets(uint8_t *text, size_t fstart, size_t fend,
     return 1;
 }
 
-/* Immutable metadata used by the runtime patch-safety check. */
-static const avxemu_image *g_patch_image;
-
 /* Branch-target scratch for the patch-safety scan. avxemu_patch_safe now runs
  * INSIDE the SIGILL handler (on_sigill -> avxemu_relocate_block -> avxemu_patch_safe),
  * so it must NOT call malloc/free: those are not async-signal-safe and the fault
@@ -2118,38 +2121,45 @@ static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t read
 /* lcache replay: one recorded run's instructions, decoded afresh. It must still be
  * a contiguous run of faulting instructions that ends exactly at its resume
  * point, or the recording does not describe this program. out may be NULL. */
-static int replay_decode(uint8_t *text, size_t text_size, const lc_run *r, tramp_insn *out) {
-    if (r->n == 0 || r->n > MAXRUN || r->site >= text_size || r->resume > text_size ||
-        r->resume < (uint64_t)r->site + 5)
-        return 0;
-    size_t p = r->site;
+static int replay_decode(const avxemu_image *image, const lc_run *r, tramp_insn *out) {
+    uint8_t *start = avxemu_lc_resolve(image, r->site, 5);
+    uint8_t *resume = avxemu_lc_resolve(image, r->resume, 0);
+    if (!start || !resume || r->site.range != r->resume.range || r->n == 0 ||
+        r->n > MAXRUN || r->resume.off < r->site.off || r->resume.off - r->site.off < 5) return 0;
+    uint8_t *p = start;
     for (uint32_t k = 0; k < r->n; k++) {
-        if (p >= r->resume) return 0;
-        decoded d; int dl = decode(text + p, &d);
-        if (!(dl > 0 && d.op && tramp_faults(&d))) return 0;
-        int zk, oo; int l = x86_len(text + p, text + r->resume, &zk, &oo);
-        if (l <= 0) return 0;
-        if (out) { out[k].addr = (uint64_t)(text + p); out[k].dec = d; }
+        if (p >= resume) return 0;
+        int zk, oo; int l = x86_len(p, resume, &zk, &oo);
+        if (l <= 0 || l > 15) return 0;
+        /* Decode only a bounded instruction, with zero padding for the
+         * emulator decoder's speculative ModRM/displacement reads. */
+        uint8_t bytes[32] = {0};
+        memcpy(bytes, p, (size_t)l);
+        decoded d; int dl = decode(bytes, &d);
+        if (dl != l || !d.op || !tramp_faults(&d)) return 0;
+        if (out) { out[k].addr = (uint64_t)p; out[k].dec = d; }
         p += (size_t)l;
     }
-    return p == r->resume;
+    return p == resume;
 }
 
-/* Place every recorded trampoline without the analysis that found it. All runs
- * are checked before any is placed, so a mismatch leaves text as it was and the
- * caller can simply analyse instead. */
-static int replay_runs(uint8_t *text, size_t text_size, long *total) {
+/* Validate the complete stage across all ranges before placing its first jmp. */
+static int replay_runs_valid(const avxemu_image *image) {
     const lc_run *r; uint32_t n = avxemu_lc_runs(&r);
-    for (uint32_t i = 0; i < n; i++) if (!replay_decode(text, text_size, &r[i], 0)) return 0;
-    long t = 0;
-    for (uint32_t i = 0; i < n; i++) {
-        tramp_insn insns[MAXRUN];
-        replay_decode(text, text_size, &r[i], insns);
-        if (g_nstats) nstats_tally(insns, (int)r[i].n);
-        t += place_run(text, insns, (int)r[i].n, r[i].site, r[i].resume);
-    }
-    *total = t;
+    for (uint32_t i = 0; i < n; i++) if (!replay_decode(image, &r[i], 0)) return 0;
     return 1;
+}
+static long replay_runs(const avxemu_image *image, uint32_t range) {
+    const lc_run *r; uint32_t n = avxemu_lc_runs(&r);
+    long total = 0;
+    for (uint32_t i = 0; i < n; i++) if (r[i].site.range == range) {
+        tramp_insn insns[MAXRUN];
+        if (!replay_decode(image, &r[i], insns)) continue;
+        if (g_nstats) nstats_tally(insns, (int)r[i].n);
+        total += place_run(image->ranges[range].base, insns, (int)r[i].n,
+                           (size_t)r[i].site.off, (size_t)r[i].resume.off);
+    }
+    return total;
 }
 
 /* Install trampolines over the main executable. Returns jmps written. */
@@ -2181,6 +2191,7 @@ long avxemu_install_trampolines(void) {
     if (!g_pool && !avxemu_pool_init((void *)hint, 96u << 20)) {
         avxemu_lc_rec_fail(); return 0;
     }
+    if (avxemu_lc_mode == LC_REPLAY && !replay_runs_valid(image)) avxemu_lc_invalid();
     long total = 0;
     for (size_t ri = 0; ri < image->nranges; ri++) {
         const avxemu_code_range *range = &image->ranges[ri];
@@ -2189,12 +2200,9 @@ long avxemu_install_trampolines(void) {
         if (!saved) {
             avxemu_lc_rec_fail(); continue;
         }
-        long replayed = 0;
-        if (avxemu_lc_mode == LC_REPLAY && image->nranges == 1 &&
-            replay_runs(range->base, range->size, &replayed)) {
-            total += replayed;
+        if (avxemu_lc_mode == LC_REPLAY) {
+            total += replay_runs(image, (uint32_t)ri);
         } else {
-            if (avxemu_lc_mode == LC_REPLAY) avxemu_lc_invalid();
             for (size_t fi = 0; fi < image->nfunctions; fi++) {
                 const avxemu_function *f = &image->functions[fi];
                 if (f->range != ri || f->begin >= f->end || f->end > range->size) continue;

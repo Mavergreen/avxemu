@@ -38,6 +38,13 @@ avxemu_test_exe(scan-contract SOURCES scan_contract.c LINK avxemu_core avxemu_as
 add_test(NAME scan-contract COMMAND $<TARGET_FILE:scan-contract>)
 set_tests_properties(scan-contract PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
+# Synthetic image and identities, with the real cache, scanner and memory backend.
+avxemu_test_exe(cache-ranges SOURCES cache_ranges.c
+  "${PROJECT_SOURCE_DIR}/src/lcache.c" "${PROJECT_SOURCE_DIR}/src/cpuid.c"
+  "${PROJECT_SOURCE_DIR}/src/patch_mem.c" "${PROJECT_SOURCE_DIR}/src/lde.c"
+  "${PROJECT_SOURCE_DIR}/src/image.c" "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
+add_test(NAME cache-ranges COMMAND $<TARGET_FILE:cache-ranges>)
+
 avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
@@ -113,7 +120,7 @@ add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --becaus
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
-set_tests_properties(image-contract image-live image-live-linked memory-contract scan-contract run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
                      linkhook-no-rebind inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page
