@@ -1,3 +1,81 @@
+if(AVXEMU_BACKEND_TESTS_ONLY)
+  avxemu_objects(avxemu_linux_elf "${PROJECT_SOURCE_DIR}/src/platform/linux/elf.c")
+  avxemu_objects(avxemu_linux_image "${PROJECT_SOURCE_DIR}/src/platform/linux/image.c"
+    "${PROJECT_SOURCE_DIR}/src/image.c")
+  foreach(obj avxemu_linux_elf avxemu_linux_image avxemu_linux_memory avxemu_linux_host)
+    set_target_properties(${obj} PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  endforeach()
+  add_library(image-backend SHARED $<TARGET_OBJECTS:avxemu_linux_elf>
+    $<TARGET_OBJECTS:avxemu_linux_image> $<TARGET_OBJECTS:avxemu_linux_memory>
+    $<TARGET_OBJECTS:avxemu_linux_host>)
+  target_link_libraries(image-backend PRIVATE ${CMAKE_DL_LIBS})
+  foreach(kind pie exec)
+    add_executable(elf-probe-${kind} fixtures/elf_probe.c fixtures/elf_probe.S)
+    if(kind STREQUAL "pie")
+      target_compile_options(elf-probe-${kind} PRIVATE -fPIE)
+      target_link_options(elf-probe-${kind} PRIVATE -pie)
+    else()
+      target_compile_options(elf-probe-${kind} PRIVATE -fno-pie)
+      target_link_options(elf-probe-${kind} PRIVATE -no-pie)
+    endif()
+    add_custom_command(TARGET elf-probe-${kind} POST_BUILD
+      COMMAND "${CMAKE_STRIP}" --strip-all -o "$<TARGET_FILE:elf-probe-${kind}>-stripped"
+        "$<TARGET_FILE:elf-probe-${kind}>" VERBATIM)
+  endforeach()
+  add_executable(elf-contract elf_contract.c $<TARGET_OBJECTS:avxemu_linux_elf>)
+  add_dependencies(elf-contract elf-probe-pie elf-probe-exec)
+  add_test(NAME elf-contract COMMAND elf-contract
+    $<TARGET_FILE:elf-probe-pie> "$<TARGET_FILE:elf-probe-pie>-stripped"
+    $<TARGET_FILE:elf-probe-exec> "$<TARGET_FILE:elf-probe-exec>-stripped")
+  add_executable(image-contract image_contract.c "${PROJECT_SOURCE_DIR}/src/image.c")
+  add_test(NAME image-contract COMMAND image-contract)
+  add_executable(linux-image-live linux_image_live.c fixtures/elf_probe.S
+    $<TARGET_OBJECTS:avxemu_linux_elf> $<TARGET_OBJECTS:avxemu_linux_image>
+    $<TARGET_OBJECTS:avxemu_linux_memory> $<TARGET_OBJECTS:avxemu_linux_host>)
+  target_link_libraries(linux-image-live PRIVATE ${CMAKE_DL_LIBS})
+  add_executable(linux-image-linked linux_image_live.c fixtures/elf_probe.S)
+  target_link_libraries(linux-image-linked PRIVATE image-backend)
+  add_executable(linux-image-exec linux_image_live.c fixtures/elf_probe.S)
+  target_compile_options(linux-image-exec PRIVATE -fno-pie)
+  target_link_options(linux-image-exec PRIVATE -no-pie)
+  target_link_libraries(linux-image-exec PRIVATE image-backend)
+  foreach(contract elf-contract image-contract linux-image-live linux-image-linked linux-image-exec)
+    target_compile_options(${contract} PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
+    target_include_directories(${contract} PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  endforeach()
+  add_test(NAME linux-image-live COMMAND linux-image-live embedded)
+  add_test(NAME linux-image-linked COMMAND linux-image-linked shared)
+  add_test(NAME linux-image-exec COMMAND linux-image-exec shared)
+  # glibc's explicit loader invocation changes /proc/self/exe to the loader.
+  find_file(AVXEMU_TEST_LD_SO ld-linux-x86-64.so.2 PATHS /lib64 /lib/x86_64-linux-gnu NO_DEFAULT_PATH)
+  if(AVXEMU_TEST_LD_SO)
+    add_test(NAME linux-image-loader COMMAND "${AVXEMU_TEST_LD_SO}" $<TARGET_FILE:linux-image-linked> shared)
+    add_test(NAME linux-image-loader-exec COMMAND "${AVXEMU_TEST_LD_SO}" $<TARGET_FILE:linux-image-exec> shared)
+  endif()
+  add_executable(linux-image-faults linux_image_faults.c $<TARGET_OBJECTS:avxemu_linux_elf>
+    $<TARGET_OBJECTS:avxemu_linux_image> $<TARGET_OBJECTS:avxemu_linux_memory>)
+  target_compile_options(linux-image-faults PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
+  target_include_directories(linux-image-faults PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_link_libraries(linux-image-faults PRIVATE ${CMAKE_DL_LIBS})
+  target_link_options(linux-image-faults PRIVATE -Wl,--wrap=open -Wl,--wrap=mmap -Wl,--wrap=munmap)
+  foreach(mode 1 2 3)
+    add_test(NAME linux-image-faults-${mode} COMMAND linux-image-faults ${mode} $<TARGET_FILE:elf-probe-pie>)
+  endforeach()
+  add_library(image-backend-no-id SHARED $<TARGET_OBJECTS:avxemu_linux_elf>
+    $<TARGET_OBJECTS:avxemu_linux_image> $<TARGET_OBJECTS:avxemu_linux_memory>
+    $<TARGET_OBJECTS:avxemu_linux_host>)
+  target_link_options(image-backend-no-id PRIVATE -Wl,--build-id=none)
+  target_link_libraries(image-backend-no-id PRIVATE ${CMAKE_DL_LIBS})
+  add_executable(linux-image-no-id linux_image_no_id.c)
+  target_compile_options(linux-image-no-id PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
+  target_include_directories(linux-image-no-id PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_link_libraries(linux-image-no-id PRIVATE image-backend-no-id)
+  add_test(NAME linux-image-no-id COMMAND linux-image-no-id)
+  get_property(backend_tests DIRECTORY PROPERTY TESTS)
+  set_tests_properties(${backend_tests} PROPERTIES LABELS hermetic TIMEOUT 60)
+  return()
+endif()
+
 # avxemu's tests. Each later task appends; the _replay_objs block added in Task 7, and then the
 # AVXEMU_NOCACHE block, stay last.
 
