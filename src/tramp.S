@@ -1,4 +1,6 @@
-// tramp.s — trampoline thunk template.
+#include "asm.h"
+
+// tramp.S — trampoline thunk template.
 //
 // One copy of this template is emitted per faulting run. A patched site does
 // `jmp` here; the thunk spills the live machine state into a register-file on
@@ -9,7 +11,8 @@
 // The template is position-independent: every internal reference is RIP-relative
 // with a FIXED displacement, so the builder just memcpy's [tt_start,tt_end),
 // appends the run_record, and writes two pointer slots (dispatch, resume). No
-// code bytes are patched.
+// code bytes are patched. Local aliases resolve the internal displacements at
+// assembly time; ELF visibility also keeps the exported bounds non-preemptible.
 //
 // Frame after `sub rsp,FRAME` (rsp-relative), matching avxemu_regfile:
 //   [0   ..511] ymm[16][32]
@@ -25,18 +28,23 @@
 .set RF_MXCSR, 656         // SSE control/status word (preserved across the C emulation)
 
 .text
-.align 4
-.globl _avxemu_tt_start
-.globl _avxemu_tt_dispatchptr
-.globl _avxemu_tt_resumeptr
-.globl _avxemu_tt_record
-.globl _avxemu_tt_end
+.p2align 4
+.globl AVXEMU_SYM(avxemu_tt_start)
+AVXEMU_HIDDEN(avxemu_tt_start)
+.globl AVXEMU_SYM(avxemu_tt_dispatchptr)
+AVXEMU_HIDDEN(avxemu_tt_dispatchptr)
+.globl AVXEMU_SYM(avxemu_tt_resumeptr)
+AVXEMU_HIDDEN(avxemu_tt_resumeptr)
+.globl AVXEMU_SYM(avxemu_tt_record)
+AVXEMU_HIDDEN(avxemu_tt_record)
+.globl AVXEMU_SYM(avxemu_tt_end)
+AVXEMU_HIDDEN(avxemu_tt_end)
 
-_avxemu_tt_start:
+AVXEMU_SYM(avxemu_tt_start):
     leaq    -FRAME(%rsp), %rsp                 // lea (NOT sub): must not disturb the
                                                // program's flags before we save them
     movq    %r11, RF_GPR+11*8(%rsp)            // save program r11 first (we reuse it)
-    leaq    _avxemu_tt_record(%rip), %r11      // r11 = &run_record (this thunk's, fixed disp)
+    leaq    Lavxemu_tt_record(%rip), %r11      // r11 = &run_record (this thunk's, fixed disp)
 
     movq    %rax, RF_GPR+0*8(%rsp)
     movq    %rcx, RF_GPR+1*8(%rsp)
@@ -81,7 +89,7 @@ _avxemu_tt_start:
     movq    %r11, %rdi                          // arg1 = run_record
     movq    %rbx, %rsi                          // arg2 = regfile
     andq    $-16, %rsp                          // 16-align for the C call
-    call    *_avxemu_tt_dispatchptr(%rip)
+    call    *Lavxemu_tt_dispatchptr(%rip)
     movq    %rbx, %rsp                          // restore frame base
     ldmxcsr RF_MXCSR(%rsp)                       // restore SSE control word (C emu may have set flags)
 
@@ -121,13 +129,17 @@ _avxemu_tt_start:
     popfq
     leaq    FRAME(%rbx), %rsp                   // restore rsp (lea: preserves flags)
     movq    RF_GPR+3*8(%rbx), %rbx              // restore program rbx (last)
-    jmp     *_avxemu_tt_resumeptr(%rip)
+    jmp     *Lavxemu_tt_resumeptr(%rip)
 
-.align 8
-_avxemu_tt_dispatchptr: .quad 0                 // -> avxemu_tramp_dispatch (set by builder)
-_avxemu_tt_resumeptr:   .quad 0                 // -> resume address (set per run)
-_avxemu_tt_record:                              // run_record bytes appended here per run
-_avxemu_tt_end:
+.p2align 8
+AVXEMU_SYM(avxemu_tt_dispatchptr):
+Lavxemu_tt_dispatchptr: .quad 0                 // -> avxemu_tramp_dispatch (set by builder)
+AVXEMU_SYM(avxemu_tt_resumeptr):
+Lavxemu_tt_resumeptr:   .quad 0                 // -> resume address (set per run)
+AVXEMU_SYM(avxemu_tt_record):
+Lavxemu_tt_record:                              // run_record bytes appended here per run
+AVXEMU_SYM(avxemu_tt_end):
+
 
 // ---- GPR-only thunk template ------------------------------------------------
 // Identical to the template above EXCEPT the vector spill saves only xmm0-15
@@ -138,16 +150,21 @@ _avxemu_tt_end:
 // the SSE-only C emulation may clobber them). The upper 128 bits (ymmh) are not
 // touched by the -mno-avx C code, so they need no save/restore. Halves the
 // dominant per-run memory traffic (256-bit -> 128-bit, 32 moves either way).
-.align 4
-.globl _avxemu_ttg_start
-.globl _avxemu_ttg_dispatchptr
-.globl _avxemu_ttg_resumeptr
-.globl _avxemu_ttg_record
-.globl _avxemu_ttg_end
-_avxemu_ttg_start:
+.p2align 4
+.globl AVXEMU_SYM(avxemu_ttg_start)
+AVXEMU_HIDDEN(avxemu_ttg_start)
+.globl AVXEMU_SYM(avxemu_ttg_dispatchptr)
+AVXEMU_HIDDEN(avxemu_ttg_dispatchptr)
+.globl AVXEMU_SYM(avxemu_ttg_resumeptr)
+AVXEMU_HIDDEN(avxemu_ttg_resumeptr)
+.globl AVXEMU_SYM(avxemu_ttg_record)
+AVXEMU_HIDDEN(avxemu_ttg_record)
+.globl AVXEMU_SYM(avxemu_ttg_end)
+AVXEMU_HIDDEN(avxemu_ttg_end)
+AVXEMU_SYM(avxemu_ttg_start):
     leaq    -FRAME(%rsp), %rsp
     movq    %r11, RF_GPR+11*8(%rsp)
-    leaq    _avxemu_ttg_record(%rip), %r11
+    leaq    Lavxemu_ttg_record(%rip), %r11
     movq    %rax, RF_GPR+0*8(%rsp)
     movq    %rcx, RF_GPR+1*8(%rsp)
     movq    %rdx, RF_GPR+2*8(%rsp)
@@ -188,7 +205,7 @@ _avxemu_ttg_start:
     movq    %r11, %rdi
     movq    %rbx, %rsi
     andq    $-16, %rsp
-    call    *_avxemu_ttg_dispatchptr(%rip)
+    call    *Lavxemu_ttg_dispatchptr(%rip)
     movq    %rbx, %rsp
     ldmxcsr RF_MXCSR(%rsp)
     movdqu  0*32(%rsp),  %xmm0
@@ -225,12 +242,16 @@ _avxemu_ttg_start:
     popfq
     leaq    FRAME(%rbx), %rsp
     movq    RF_GPR+3*8(%rbx), %rbx
-    jmp     *_avxemu_ttg_resumeptr(%rip)
-.align 8
-_avxemu_ttg_dispatchptr: .quad 0
-_avxemu_ttg_resumeptr:   .quad 0
-_avxemu_ttg_record:
-_avxemu_ttg_end:
+    jmp     *Lavxemu_ttg_resumeptr(%rip)
+.p2align 8
+AVXEMU_SYM(avxemu_ttg_dispatchptr):
+Lavxemu_ttg_dispatchptr: .quad 0
+AVXEMU_SYM(avxemu_ttg_resumeptr):
+Lavxemu_ttg_resumeptr:   .quad 0
+AVXEMU_SYM(avxemu_ttg_record):
+Lavxemu_ttg_record:
+AVXEMU_SYM(avxemu_ttg_end):
+
 
 // ---- BMI register-only thunk template (no vector save at all) ---------------
 // Used only for runs whose every instruction is a register-operand GPR-domain op
@@ -239,16 +260,21 @@ _avxemu_ttg_end:
 // emulate use no SSE), so the program's xmm/ymm are untouched across the call and
 // need NO save/restore. Saves only GPRs + rflags. Eliminates all 32 vector spills
 // and the mxcsr save -- the bulk of the per-run cost -- for the BMI hot path.
-.align 4
-.globl _avxemu_tt2_start
-.globl _avxemu_tt2_dispatchptr
-.globl _avxemu_tt2_resumeptr
-.globl _avxemu_tt2_record
-.globl _avxemu_tt2_end
-_avxemu_tt2_start:
+.p2align 4
+.globl AVXEMU_SYM(avxemu_tt2_start)
+AVXEMU_HIDDEN(avxemu_tt2_start)
+.globl AVXEMU_SYM(avxemu_tt2_dispatchptr)
+AVXEMU_HIDDEN(avxemu_tt2_dispatchptr)
+.globl AVXEMU_SYM(avxemu_tt2_resumeptr)
+AVXEMU_HIDDEN(avxemu_tt2_resumeptr)
+.globl AVXEMU_SYM(avxemu_tt2_record)
+AVXEMU_HIDDEN(avxemu_tt2_record)
+.globl AVXEMU_SYM(avxemu_tt2_end)
+AVXEMU_HIDDEN(avxemu_tt2_end)
+AVXEMU_SYM(avxemu_tt2_start):
     leaq    -FRAME(%rsp), %rsp
     movq    %r11, RF_GPR+11*8(%rsp)
-    leaq    _avxemu_tt2_record(%rip), %r11
+    leaq    Lavxemu_tt2_record(%rip), %r11
     movq    %rax, RF_GPR+0*8(%rsp)
     movq    %rcx, RF_GPR+1*8(%rsp)
     movq    %rdx, RF_GPR+2*8(%rsp)
@@ -272,7 +298,7 @@ _avxemu_tt2_start:
     movq    %r11, %rdi
     movq    %rbx, %rsi
     andq    $-16, %rsp
-    call    *_avxemu_tt2_dispatchptr(%rip)
+    call    *Lavxemu_tt2_dispatchptr(%rip)
     movq    %rbx, %rsp
     movq    RF_GPR+0*8(%rbx),  %rax
     movq    RF_GPR+1*8(%rbx),  %rcx
@@ -292,21 +318,24 @@ _avxemu_tt2_start:
     popfq
     leaq    FRAME(%rbx), %rsp
     movq    RF_GPR+3*8(%rbx), %rbx
-    jmp     *_avxemu_tt2_resumeptr(%rip)
-.align 8
-_avxemu_tt2_dispatchptr: .quad 0
-_avxemu_tt2_resumeptr:   .quad 0
-_avxemu_tt2_record:
-_avxemu_tt2_end:
+    jmp     *Lavxemu_tt2_resumeptr(%rip)
+.p2align 8
+AVXEMU_SYM(avxemu_tt2_dispatchptr):
+Lavxemu_tt2_dispatchptr: .quad 0
+AVXEMU_SYM(avxemu_tt2_resumeptr):
+Lavxemu_tt2_resumeptr:   .quad 0
+AVXEMU_SYM(avxemu_tt2_record):
+Lavxemu_tt2_record:
+AVXEMU_SYM(avxemu_tt2_end):
+
 
 // avxemu_run_on_stack(base, sz, fn, a, b): run fn(a,b) on the side stack
 // [base, base+sz). Keeps the heavy C emulation off the program stack. If rsp is
 // already inside that range (a nested call, e.g. a signal during emulation),
 // run fn in place so nested use grows the side stack naturally.
 // rdi=base, rsi=sz, rdx=fn, rcx=a, r8=b.
-.align 4
-.globl _avxemu_run_on_stack
-_avxemu_run_on_stack:
+.p2align 4
+AVXEMU_FUNCTION(avxemu_run_on_stack)
     movq    %rsp, %rax
     subq    %rdi, %rax
     cmpq    %rsi, %rax
@@ -323,3 +352,7 @@ _avxemu_run_on_stack:
 1:  movq    %rcx, %rdi
     movq    %r8,  %rsi
     jmpq    *%rdx                               // already on side stack: tail-call fn(a,b)
+
+AVXEMU_END_FUNCTION(avxemu_run_on_stack)
+
+AVXEMU_GNU_STACK

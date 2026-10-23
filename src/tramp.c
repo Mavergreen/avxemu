@@ -3,7 +3,7 @@
  * tramp.c — trampoline dispatch, thunk pool, and thunk builder.
  *
  * A "run" is a maximal sequence of consecutive faulting instructions. Each run
- * gets one thunk (tramp.s template + an appended run_record). The patched site
+ * gets one thunk (tramp.S template + an appended run_record). The patched site
  * jumps to the thunk; the thunk snapshots state into a regfile and calls
  * avxemu_tramp_dispatch(), which emulates each instruction of the run in order.
  */
@@ -25,7 +25,7 @@
 #include <signal.h>
 #include <fcntl.h>
 
-/* run_record: laid out immediately after the thunk code (see tramp.s). */
+/* run_record: laid out immediately after the thunk code (see tramp.S). */
 typedef struct { uint64_t addr; decoded dec; } tramp_insn;   /* addr feeds rf->rip per instruction */
 typedef struct { uint32_t n; uint32_t pad; tramp_insn insns[]; } run_record;
 
@@ -129,7 +129,7 @@ extern void avxemu_run_on_stack(uint8_t *base, size_t sz,
 static pthread_key_t g_side_key;
 static int g_side_key_ok = 0;
 
-/* Called from the thunk (tramp.s) with the live state spilled into rf. */
+/* Called from the thunk (tramp.S) with the live state spilled into rf. */
 void avxemu_tramp_dispatch(const run_record *r, avxemu_regfile *rf) {
     if (!g_side_key_ok) { tramp_emulate_run(r, rf); return; }   /* no key: program stack */
     uint8_t *side = (uint8_t *)pthread_getspecific(g_side_key);
@@ -850,7 +850,7 @@ static int emit_minspill_lzcnt(uint8_t **p, const decoded *d, uint64_t resume){
     if (T1 < 0 || T2 < 0) return 0;
 
     /* Step BELOW the interrupted function's 128-byte red zone before using the
-     * stack (push/pushfq), then restore — matching tramp.s's FRAME discipline.
+     * stack (push/pushfq), then restore — matching tramp.S's FRAME discipline.
      * lea (not sub) so flags are untouched: pushfq below still sees ORIGINAL flags. */
     gb_lea_rsp(p, -128);
     gb_push(p, T1);

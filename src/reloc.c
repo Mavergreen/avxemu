@@ -33,12 +33,12 @@
 #include "avxemu_cpuid.h"
 #include <unistd.h>
 
-/* Must match tramp.c / tramp.s exactly (the run_record is appended after the
+/* Must match tramp.c / tramp.S exactly (the run_record is appended after the
  * tt thunk code; the dispatcher walks insns[i].dec / .addr). */
 typedef struct { uint64_t addr; decoded dec; } tramp_insn;
 typedef struct { uint32_t n; uint32_t pad; tramp_insn insns[]; } run_record;
 
-/* tt thunk template (tramp.s): full spill (all ymm) -> call dispatch -> reload
+/* tt thunk template (tramp.S): full spill (all ymm) -> call dispatch -> reload
  * -> jmp resume. Position-independent; the builder memcpy's [tt_start,tt_record),
  * sets the two pointer slots, and appends the run_record. */
 extern char avxemu_tt_start[], avxemu_tt_record[];

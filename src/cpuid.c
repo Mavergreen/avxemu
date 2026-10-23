@@ -1,5 +1,6 @@
 /* CPU feature policy and owned CPUID trap sites. */
 #include "avxemu_cpuid.h"
+#include "asm.h"
 #include "lde.h"
 #include "lcache.h"
 #include <stdlib.h>
@@ -17,11 +18,7 @@ static uint32_t g_l1ecx_set, g_l1ecx_clr, g_l7ebx_set, g_l7ebx_clr;
  * detection would see the AVX2 we advertise instead of the CPU it runs on.
  * A section of its own in __TEXT is executable and invisible to that scan.
  */
-#ifdef __APPLE__
-__attribute__((noinline, section("__TEXT,__avxemu_raw,regular,pure_instructions")))
-#else
-__attribute__((noinline, section(".avxemu_raw")))
-#endif
+AVXEMU_RAW_ATTR
 void avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
     __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
 }

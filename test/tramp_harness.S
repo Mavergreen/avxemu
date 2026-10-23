@@ -1,19 +1,20 @@
-// tramp_harness.s — drive a thunk with a full, known machine state and capture
+#include "asm.h"
+
+// tramp_harness.S — drive a thunk with a full, known machine state and capture
 // the state it produces. State layout matches the test's struct:
 //   [0..511] ymm[16][32]   [512..639] gpr[16]   [640] rflags
 // rsp (gpr[4]) is intentionally left as the harness's own; the thunk preserves
 // it, so it is not loaded from `in` nor meaningfully captured.
 
 .data
-.align 8
+.p2align 8
 g_out:     .quad 0
 g_thunk:   .quad 0
 g_scratch: .quad 0
 
-.section __TEXT,__avxemu_test,regular,pure_instructions
-.align 4
-.globl _tramp_test_invoke
-_tramp_test_invoke:                 // rdi=thunk, rsi=in, rdx=out
+AVXEMU_TEST_SECTION
+.p2align 4
+AVXEMU_FUNCTION(tramp_test_invoke)                 // rdi=thunk, rsi=in, rdx=out
     pushq %rbx; pushq %rbp; pushq %r12; pushq %r13; pushq %r14; pushq %r15
     movq  %rdx, g_out(%rip)
     movq  %rdi, g_thunk(%rip)
@@ -54,9 +55,9 @@ _tramp_test_invoke:                 // rdi=thunk, rsi=in, rdx=out
     movq 512+15*8(%rsi), %r15
     movq 512+6*8(%rsi),  %rsi        // rsi last
     jmp  *g_thunk(%rip)
+AVXEMU_END_FUNCTION(tramp_test_invoke)
 
-.globl _tramp_test_capture
-_tramp_test_capture:                // thunk resumes here with the post-run state
+AVXEMU_FUNCTION(tramp_test_capture)                // thunk resumes here with the post-run state
     movq %rax, g_scratch(%rip)
     movq g_out(%rip), %rax
     movq %rcx, 512+1*8(%rax)
@@ -96,18 +97,21 @@ _tramp_test_capture:                // thunk resumes here with the post-run stat
     vmovdqu %ymm15, 15*32(%rax)
     popq %r15; popq %r14; popq %r13; popq %r12; popq %rbp; popq %rbx
     ret
+AVXEMU_END_FUNCTION(tramp_test_capture)
 
 // Sample instructions (never executed) so the test decodes assembler-correct
 // bytes instead of hand-encoded ones. Read via the _ti_labels array.
-.section __TEXT,__avxemu_test,regular,pure_instructions
-.align 4
-_ti0: vpaddd %ymm2,%ymm1,%ymm0      // ymm0 = ymm1 + ymm2
-_ti1: vpxor  %ymm4,%ymm3,%ymm5      // ymm5 = ymm3 ^ ymm4
-_ti2: shlxq  %rcx,%r8,%rax          // rax  = r8 << rcx
-_ti3: andnq  %r9,%r10,%rax          // rax  = ~r10 & r9
-_ti4:
+AVXEMU_TEST_SECTION
+.p2align 4
+AVXEMU_SYM(ti0): vpaddd %ymm2,%ymm1,%ymm0      // ymm0 = ymm1 + ymm2
+AVXEMU_SYM(ti1): vpxor  %ymm4,%ymm3,%ymm5      // ymm5 = ymm3 ^ ymm4
+AVXEMU_SYM(ti2): shlxq  %rcx,%r8,%rax          // rax  = r8 << rcx
+AVXEMU_SYM(ti3): andnq  %r9,%r10,%rax          // rax  = ~r10 & r9
+AVXEMU_SYM(ti4):
 
 .data
-.align 8
-.globl _ti_labels
-_ti_labels: .quad _ti0, _ti1, _ti2, _ti3, _ti4
+.p2align 8
+.globl AVXEMU_SYM(ti_labels)
+AVXEMU_SYM(ti_labels): .quad AVXEMU_SYM(ti0), AVXEMU_SYM(ti1), AVXEMU_SYM(ti2), AVXEMU_SYM(ti3), AVXEMU_SYM(ti4)
+
+AVXEMU_GNU_STACK

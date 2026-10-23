@@ -24,6 +24,9 @@ endfunction()
 
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
+avxemu_test_exe(asm-contract SOURCES asm_contract.c "${PROJECT_SOURCE_DIR}/src/tramp.S")
+add_test(NAME asm-contract COMMAND $<TARGET_FILE:asm-contract>)
+
 avxemu_test_exe(image-contract SOURCES image_contract.c "${PROJECT_SOURCE_DIR}/src/image.c")
 add_test(NAME image-contract COMMAND $<TARGET_FILE:image-contract>)
 
@@ -48,25 +51,25 @@ add_test(NAME cache-ranges COMMAND $<TARGET_FILE:cache-ranges>)
 avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
-avxemu_test_exe(context-contract SOURCES context_contract.c context_contract.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(context-contract SOURCES context_contract.c context_contract.S LINK avxemu_core avxemu_asm)
 add_test(NAME context-contract COMMAND $<TARGET_FILE:context-contract>)
 avxemu_test_exe(loader-contract SOURCES loader_contract.c LINK avxemu_core avxemu_asm)
 add_test(NAME loader-contract COMMAND $<TARGET_FILE:loader-contract>)
 set_tests_properties(loader-contract PROPERTIES ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1" TIMEOUT 90)
 
-avxemu_test_exe(inject SOURCES inject.c stubs.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(inject SOURCES inject.c stubs.S LINK avxemu_core avxemu_asm)
 add_test(NAME inject COMMAND $<TARGET_FILE:inject>)
 
-avxemu_test_exe(memtest SOURCES memtest.c memtest.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(memtest SOURCES memtest.c memtest.S LINK avxemu_core avxemu_asm)
 add_test(NAME memtest COMMAND $<TARGET_FILE:memtest>)
 
-avxemu_test_exe(tramptest SOURCES tramptest.c tramp_harness.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(tramptest SOURCES tramptest.c tramp_harness.S LINK avxemu_core avxemu_asm)
 add_test(NAME tramptest COMMAND $<TARGET_FILE:tramptest>)
 
 avxemu_test_exe(overread SOURCES overread.c LINK avxemu_core avxemu_asm)
 add_test(NAME overread COMMAND $<TARGET_FILE:overread>)
 
-avxemu_test_exe(reloctest SOURCES reloctest.c LINK avxemu_core avxemu_asm)
+avxemu_test_exe(reloctest SOURCES reloctest.c reloc_harness.S LINK avxemu_core avxemu_asm)
 add_test(NAME reloctest COMMAND $<TARGET_FILE:reloctest>)
 set_tests_properties(reloctest PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1;AVXEMU_FORCETRAMP=1")
 
@@ -77,14 +80,14 @@ set_tests_properties(nativetest PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 # The live-register BMI thunks (AVXEMU_MINSPILL, on by default), each against bmi_exec, and
 # which tier each setting selects. Hermetic: the emitted code is base-ISA only, and
 # AVXEMU_DISABLE keeps the constructor out (the test sets up the pool itself).
-avxemu_test_exe(minspilltest SOURCES minspilltest.c minspill_harness.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(minspilltest SOURCES minspilltest.c minspill_harness.S LINK avxemu_core avxemu_asm)
 add_test(NAME minspilltest COMMAND $<TARGET_FILE:minspilltest> on)
 add_test(NAME minspilltest-off COMMAND env AVXEMU_MINSPILL=0 $<TARGET_FILE:minspilltest> off)
 set_tests_properties(minspilltest minspilltest-off PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
 # Links avxemu into itself so the load-time passes act on its own cpuid, lzcnt and AVX2 run:
 # the analysis cache records them, replays them identically, and refuses bad files.
-avxemu_test_exe(cachetest SOURCES cachetest.c cachetest.s LINK avxemu_core avxemu_asm t_cpu)
+avxemu_test_exe(cachetest SOURCES cachetest.c cachetest.S LINK avxemu_core avxemu_asm t_cpu)
 set(ROSETTA_CACHE "under Rosetta three of cachetest's checks fail -- the replayed __text and pool identical to the analysed ones, a re-analysis after a corrupt file reaching the same result, and 8 simultaneous cold starts agreeing -- while its other checks pass; it passes natively on 10.9 and on Intel with AVX2; the cause is not yet diagnosed")
 add_test(NAME cachetest COMMAND ${AVXEMU_RUN} --fails-when rosetta --because "${ROSETTA_CACHE}" -- $<TARGET_FILE:cachetest>)
 
@@ -116,7 +119,7 @@ add_test(NAME inerttest-assume-capable COMMAND env AVXEMU_ASSUME_CAPABLE=1 $<TAR
 
 # Linked against the dylib, like linkhook: the production configuration. N threads race each
 # site's runtime relocation. It skips itself on a CPU with AVX2, where the loop never faults.
-avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.s LINK t_cpu)
+avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.S LINK t_cpu)
 target_link_libraries(threadtest PRIVATE avxemu)
 add_test(NAME threadtest COMMAND $<TARGET_FILE:threadtest> 20 12)
 
@@ -126,7 +129,7 @@ add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --becaus
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
-set_tests_properties(context-contract loader-contract image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(asm-contract context-contract loader-contract image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
                      linkhook-no-rebind inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page
@@ -153,6 +156,7 @@ function(avxemu_oracle name)
     list(APPEND objs $<TARGET_OBJECTS:${l}>)
   endforeach()
   add_executable(${name} ${A_ASM} ${objs})
+  target_include_directories(${name} PRIVATE "${PROJECT_SOURCE_DIR}/src")
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
   set(AVXEMU_REPLAY_PROGRAMS ${AVXEMU_REPLAY_PROGRAMS} ${name} PARENT_SCOPE)
   add_test(NAME ${name}-replay COMMAND $<TARGET_FILE:${name}> check "${CMAKE_CURRENT_SOURCE_DIR}/reference/${name}.ref")
@@ -169,16 +173,16 @@ avxemu_oracle(oracle DRIVER oracle.c HW oracle_hw.c LINK t_exec)
 avxemu_objects(t_bmi "${PROJECT_SOURCE_DIR}/src/exec_bmi.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_oracle(bmi_oracle DRIVER bmi_oracle.c HW bmi_hw.c LINK t_bmi)
 
-avxemu_oracle(patchtest DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.s LINK avxemu_core avxemu_asm)
+avxemu_oracle(patchtest DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.S LINK avxemu_core avxemu_asm)
 
-avxemu_oracle(bmimem DRIVER bmimem.c ASM bmimem.s LINK avxemu_core avxemu_asm)
+avxemu_oracle(bmimem DRIVER bmimem.c ASM bmimem.S LINK avxemu_core avxemu_asm)
 
 avxemu_objects(t_decode "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_objects(t_lde "${PROJECT_SOURCE_DIR}/src/lde.c")
 avxemu_test_exe(bintest SOURCES bintest.c LINK t_decode)
 avxemu_test_exe(patchdiff SOURCES patchdiff.c LINK t_lde)
 avxemu_test_exe(zdecode SOURCES zdecode.c LINK t_lde t_decode)
-avxemu_test_exe(fuzz SOURCES fuzz.c fuzz.s LINK avxemu_core avxemu_asm)
+avxemu_test_exe(fuzz SOURCES fuzz.c fuzz.S LINK avxemu_core avxemu_asm)
 add_test(NAME claude-decode COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-decode.sh"
   $<TARGET_FILE:bintest> $<TARGET_FILE:patchdiff> $<TARGET_FILE:zdecode> "${CMAKE_BINARY_DIR}/claude-decode")
 add_test(NAME claude-hardware COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-hardware.sh"

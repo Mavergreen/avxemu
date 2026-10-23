@@ -36,7 +36,7 @@ avxemu_objects(avxemu_core
   src/platform/darwin/context.c src/platform/darwin/loader.c
   src/cpuid.c src/patch_mem.c src/tramp.c src/reloc.c src/handler.c
   src/lcache.c src/lcache.h)
-avxemu_objects(avxemu_asm src/selftest.s src/selftest.c src/tramp.s)
+avxemu_objects(avxemu_asm src/selftest.S src/selftest.c src/tramp.S)
 
 add_library(avxemu SHARED $<TARGET_OBJECTS:avxemu_core> $<TARGET_OBJECTS:avxemu_asm>)
 set_target_properties(avxemu PROPERTIES
