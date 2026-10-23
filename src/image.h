@@ -15,13 +15,28 @@ typedef struct {
     uint32_t range;
     size_t begin, end;
 } avxemu_function;
+/* Verified non-instruction bytes inside executable ranges. */
+enum { AVXEMU_DATA_OPAQUE=0, AVXEMU_DATA_JUMP32=1 };
+typedef struct {
+    uint32_t range;
+    size_t begin, end;
+    unsigned kind;
+} avxemu_data_span;
+typedef enum { AVXEMU_SCAN_STRICT=0, AVXEMU_SCAN_LEGACY=1 } avxemu_scan_strategy;
 typedef struct {
     const avxemu_code_range *ranges;
     size_t nranges;
     const avxemu_function *functions;
     size_t nfunctions;
     const char *path;
+    const avxemu_data_span *data;
+    size_t ndata;
+    avxemu_scan_strategy strategy;
 } avxemu_image;
+/* Data spans are sorted, disjoint, nonempty and range-bounded. Invalid metadata
+ * fails validation; overlap queries fail closed. No allocation in queries. */
+int avxemu_image_data_valid(const avxemu_image *image);
+int avxemu_image_data_overlap(const avxemu_image *image, uint32_t range, size_t begin, size_t size);
 /* Initialization may allocate; failure publishes no image. */
 int avxemu_image_init(void);
 const avxemu_image *avxemu_image_main(void);

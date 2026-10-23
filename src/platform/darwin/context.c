@@ -2,6 +2,7 @@
 #include "platform/context.h"
 #include <sys/ucontext.h>
 #include <string.h>
+#include <signal.h>
 
 static uint64_t *gpr_ptr(_STRUCT_X86_THREAD_STATE64 *ss, int i) {
     switch (i) {
@@ -17,6 +18,10 @@ static uint64_t *gpr_ptr(_STRUCT_X86_THREAD_STATE64 *ss, int i) {
 static int valid(const ucontext_t *uc, int vectors) {
     return uc && uc->uc_mcontext && uc->uc_mcsize >=
         (vectors ? sizeof(_STRUCT_MCONTEXT_AVX64) : sizeof(_STRUCT_MCONTEXT64));
+}
+int avxemu_context_signal_blocked(const void *context, int signal) {
+    const ucontext_t *uc=context;
+    return uc ? sigismember(&uc->uc_sigmask,signal) : -1;
 }
 uintptr_t avxemu_context_ip(const void *context) {
     const ucontext_t *uc=context;

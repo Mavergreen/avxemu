@@ -11,6 +11,7 @@
 #include "decode.h"
 #include "vexops.h"
 #include "lde.h"
+#include "scan.h"
 #include "lcache.h"
 #include "image.h"
 #include "platform/memory.h"
@@ -38,7 +39,7 @@ extern char avxemu_ttg_dispatchptr[], avxemu_ttg_resumeptr[], avxemu_ttg_record[
 extern char avxemu_tt2_start[], avxemu_tt2_end[];
 extern char avxemu_tt2_dispatchptr[], avxemu_tt2_resumeptr[], avxemu_tt2_record[];
 
-static void emit(const char *s){ (void)write(2, s, strlen(s)); }
+static void emit(const char *s){ (void)!write(2, s, strlen(s)); }
 
 /* ============================================================================
  * Milestone-B DIAGNOSTIC (env-gated; harmless when unset): execution-weighted
@@ -56,9 +57,9 @@ static int ophist_enabled(void){
 /* async-signal-safe unsigned decimal writer */
 static void as_u64(int fd, uint64_t v){
     char b[24]; int i = 24;
-    if (v == 0){ (void)write(fd, "0", 1); return; }
+    if (v == 0){ (void)!write(fd, "0", 1); return; }
     while (v){ b[--i] = (char)('0' + (v % 10)); v /= 10; }
-    (void)write(fd, b + i, (size_t)(24 - i));
+    (void)!write(fd, b + i, (size_t)(24 - i));
 }
 /* async-signal-safe: open/write/close + strlen on static strings only, no malloc */
 static void ophist_dump_fd(int fd){
@@ -68,15 +69,15 @@ static void ophist_dump_fd(int fd){
         for (int j = i + 1; j < m; j++) if (g_ophist[idx[j]] > g_ophist[idx[best]]) best = j;
         int t = idx[i]; idx[i] = idx[best]; idx[best] = t; }
     static const char hdr[] = "=== AVXEMU_OPHIST: C-emulated op histogram (execution-weighted, desc) ===\n";
-    (void)write(fd, hdr, sizeof hdr - 1);
+    (void)!write(fd, hdr, sizeof hdr - 1);
     uint64_t total = 0;
     for (int i = 0; i < m; i++){
         const char *nm = vex_op_name((vex_op)idx[i]);
-        (void)write(fd, nm, strlen(nm)); (void)write(fd, "\t", 1);
-        as_u64(fd, g_ophist[idx[i]]); (void)write(fd, "\n", 1);
+        (void)!write(fd, nm, strlen(nm)); (void)!write(fd, "\t", 1);
+        as_u64(fd, g_ophist[idx[i]]); (void)!write(fd, "\n", 1);
         total += g_ophist[idx[i]];
     }
-    (void)write(fd, "TOTAL\t", 6); as_u64(fd, total); (void)write(fd, "\n", 1);
+    (void)!write(fd, "TOTAL\t", 6); as_u64(fd, total); (void)!write(fd, "\n", 1);
 }
 /* atomic: write to a temp path then rename, so /tmp/ophist.out is never a partial
  * file even if a kill -9 lands mid-dump (rename is atomic). */
@@ -1810,6 +1811,9 @@ void *avxemu_select_thunk(const tramp_insn *ri, int rn, uint64_t res) {
  * a replayed trampoline is the one the analysis would have built. The site was
  * already chosen branch-target-safe by the caller. */
 static int place_run(uint8_t *text, const tramp_insn *ri, int rn, size_t site_off, size_t re) {
+    uint32_t range; size_t offset;
+    if(re<site_off || !avxemu_image_find(g_patch_image,(uintptr_t)(text+site_off),re-site_off,&range,&offset) ||
+        avxemu_image_data_overlap(g_patch_image,range,offset,re-site_off)) return 0;
     {
         uint64_t res = (uint64_t)(text + re);
         void *thunk = avxemu_select_thunk(ri, rn, res);
@@ -1888,11 +1892,13 @@ static int resolve_jump_table(uint8_t *text, size_t fstart, size_t fend,
       if (a[ak] == 0x01 && (a[ak+1] >> 6) == 3) {
           int rm  = (a[ak+1] & 7)        | ((arex & 1) << 3);
           int reg = ((a[ak+1] >> 3) & 7) | ((arex & 4) << 1);
-          if (rm != rD) return 0; rB = reg;
+          if (rm != rD) return 0;
+          rB = reg;
       } else if (a[ak] == 0x03 && (a[ak+1] >> 6) == 3) {
           int reg = ((a[ak+1] >> 3) & 7) | ((arex & 4) << 1);
           int rm  = (a[ak+1] & 7)        | ((arex & 1) << 3);
-          if (reg != rD) return 0; rB = rm;
+          if (reg != rD) return 0;
+          rB = rm;
       } else return 0;
 
       /* prev2: movsxd rD, [rB + rI*4]  (63 /r mod=00 rm=100, SIB scale=2) */
@@ -2024,7 +2030,8 @@ int avxemu_patch_safe(uint8_t *site, int jmplen) {
     if (!f) return 0;
     const avxemu_code_range *range = &g_patch_image->ranges[f->range];
     size_t offset = (size_t)((uintptr_t)site - (uintptr_t)range->base);
-    if ((size_t)jmplen > f->end - offset) return 0;
+    if ((size_t)jmplen > f->end - offset ||
+        avxemu_image_data_overlap(g_patch_image,f->range,offset,(size_t)jmplen)) return 0;
     size_t fstart = f->begin, fend = f->end;
     size_t n = fend - fstart;
     if (n > PATCHSAFE_MAP_MAX) return 0;               /* span exceeds scratch cap -> decline (safe floor) */
@@ -2051,7 +2058,14 @@ void avxemu_patch_safe_test_image(const avxemu_image *image) { g_patch_image = i
 /* Bounds used before relocation decodes or copies a legal tail. */
 const uint8_t *avxemu_patch_limit(const uint8_t *site) {
     const avxemu_function *f = avxemu_image_function(g_patch_image, (uintptr_t)site);
-    return f ? g_patch_image->ranges[f->range].base + f->end : 0;
+    if(!f) return 0;
+    const avxemu_code_range *r=&g_patch_image->ranges[f->range];
+    size_t off=(size_t)(site-r->base), end=f->end;
+    for(size_t i=0;i<g_patch_image->ndata;i++) {
+        const avxemu_data_span *d=&g_patch_image->data[i];
+        if(d->range==f->range && d->begin>off && d->begin<end) end=d->begin;
+    }
+    return r->base+end;
 }
 
 /* Test hook (reloctest): register a single synthetic function [base, base+size)
@@ -2064,7 +2078,7 @@ void avxemu_patch_safe_test_region(uint8_t *base, size_t size) {
     static avxemu_image image;
     range = (avxemu_code_range){base, (uintptr_t)base, size, size, AVXEMU_PROT_R | AVXEMU_PROT_X};
     function = (avxemu_function){0, 0, size};
-    image = (avxemu_image){&range, 1, &function, 1, 0};
+    image = (avxemu_image){&range, 1, &function, 1, 0, 0, 0, AVXEMU_SCAN_STRICT};
     g_patch_image = &image;
 }
 
@@ -2076,7 +2090,12 @@ void avxemu_patch_safe_test_region(uint8_t *base, size_t size) {
  * a run of physically-consecutive ones always falls through to real code — the
  * resume point is safe in both modes.
  */
-static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t readable, int recursive) {
+static long scan_function(const avxemu_image *image, size_t fi, const avxemu_scan *scan) {
+    const avxemu_function *f=&image->functions[fi];
+    const avxemu_code_range *range=&image->ranges[f->range];
+    uint8_t *text=range->base;
+    size_t fstart=f->begin,fend=f->end,readable=range->readable;
+    int recursive=image->strategy==AVXEMU_SCAN_STRICT;
     size_t n = fend - fstart;
     uint8_t *tgt = calloc(n, 1);
     if (!tgt) return 0;
@@ -2105,7 +2124,14 @@ static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t read
          * inside reachable code only (jump-table data is never visited or patched). */
         uint8_t *code = calloc(n, 1);
         memset(tgt, 0, n);                               /* linear targets past the desync are bogus */
-        if (code && lde_rd_map_traps(text, fstart, fend, readable, code, tgt, &has_indirect, avxemu_cpuid_trap)) {
+        int mapped=0;
+        if(code && recursive) {
+            const avxemu_scan_map *map=avxemu_scan_function(scan,fi);
+            memcpy(code,map->code,n);memcpy(tgt,map->targets,n);
+            has_indirect=map->indirect;mapped=1;
+        } else if(code) mapped=lde_rd_map_traps(text,fstart,fend,readable,code,tgt,
+            &has_indirect,avxemu_cpuid_trap);
+        if (mapped) {
             size_t off = 0;
             while (off < n) {
                 if (!code[off]) { off++; continue; }
@@ -2133,6 +2159,8 @@ static int replay_decode(const avxemu_image *image, const lc_run *r, tramp_insn 
     uint8_t *resume = avxemu_lc_resolve(image, r->resume, 0);
     if (!start || !resume || r->site.range != r->resume.range || r->n == 0 ||
         r->n > MAXRUN || r->resume.off < r->site.off || r->resume.off - r->site.off < 5) return 0;
+    if(avxemu_image_data_overlap(image,r->site.range,(size_t)r->site.off,
+        (size_t)(r->resume.off-r->site.off))) return 0;
     uint8_t *p = start;
     for (uint32_t k = 0; k < r->n; k++) {
         if (p >= resume) return 0;
@@ -2151,9 +2179,13 @@ static int replay_decode(const avxemu_image *image, const lc_run *r, tramp_insn 
 }
 
 /* Validate the complete stage across all ranges before placing its first jmp. */
-static int replay_runs_valid(const avxemu_image *image) {
+static int replay_runs_valid(const avxemu_image *image, const avxemu_scan *scan) {
     const lc_run *r; uint32_t n = avxemu_lc_runs(&r);
-    for (uint32_t i = 0; i < n; i++) if (!replay_decode(image, &r[i], 0)) return 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!replay_decode(image, &r[i], 0)) return 0;
+        if(scan && !avxemu_scan_span(scan,(uintptr_t)avxemu_lc_resolve(image,r[i].site,5),
+            (size_t)(r[i].resume.off-r[i].site.off))) return 0;
+    }
     return 1;
 }
 static long replay_runs(const avxemu_image *image, uint32_t range) {
@@ -2198,7 +2230,13 @@ long avxemu_install_trampolines(void) {
     if (!g_pool && !avxemu_pool_init((void *)hint, 96u << 20)) {
         avxemu_lc_rec_fail(); return 0;
     }
-    if (avxemu_lc_mode == LC_REPLAY && !replay_runs_valid(image)) avxemu_lc_invalid();
+    avxemu_scan *scan=image->strategy==AVXEMU_SCAN_STRICT ?
+        avxemu_scan_prepare(image,avxemu_cpuid_trap,AVXEMU_SCAN_WORK_LIMIT):0;
+    if(image->strategy==AVXEMU_SCAN_STRICT && !scan) {
+        if(avxemu_lc_mode==LC_REPLAY) avxemu_lc_invalid();
+        avxemu_lc_rec_fail();return 0;
+    }
+    if (avxemu_lc_mode == LC_REPLAY && !replay_runs_valid(image,scan)) avxemu_lc_invalid();
     long total = 0;
     for (size_t ri = 0; ri < image->nranges; ri++) {
         const avxemu_code_range *range = &image->ranges[ri];
@@ -2213,13 +2251,13 @@ long avxemu_install_trampolines(void) {
             for (size_t fi = 0; fi < image->nfunctions; fi++) {
                 const avxemu_function *f = &image->functions[fi];
                 if (f->range != ri || f->begin >= f->end || f->end > range->size) continue;
-                total += scan_function(range->base, f->begin, f->end,
-                                        range->readable, AVXEMU_SCAN_RECURSIVE);
+                total += scan_function(image,fi,scan);
             }
         }
         avxemu_patch_write_end(saved, nsaved);
     }
 
+    avxemu_scan_free(scan);
     if (g_nstats){   /* AVXEMU_NATIVE_STATS run-composition report (stderr) */
         emit("=== AVXEMU_NATIVE_STATS (install-time run composition) ===\n");
         emit("native-accept runs\t"); as_u64(2, g_ns_accept); emit("\n");

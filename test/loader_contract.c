@@ -1,5 +1,8 @@
 #define _XOPEN_SOURCE 700
-#ifdef __linux__
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#endif
+#if defined(__linux__) && !defined(_DEFAULT_SOURCE)
 #define _DEFAULT_SOURCE
 #endif
 #include "platform/context.h"
@@ -11,8 +14,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <mach/mach_time.h>
+#endif
 
 #ifdef __linux__
 #define public_sigaction sigaction
@@ -25,7 +32,8 @@
 extern void avxemu_force_install(void);
 extern int avxemu_test_ud2;
 extern uint64_t e2e_shlx(uint64_t, uint64_t);
-static int expected_signal=SIGILL;
+extern void guard_operand(const void *);
+static int expected_signal=SIGILL, mask_faults;
 static volatile sig_atomic_t calls, bad, nodefer, oneshot;
 static void simple(int sig) { if(sig!=expected_signal) bad=1; calls++; }
 static void detailed(int sig, siginfo_t *info, void *context) {
@@ -33,6 +41,7 @@ static void detailed(int sig, siginfo_t *info, void *context) {
     sigprocmask(SIG_SETMASK,0,&mask);
     if(sig!=SIGILL || !info || info->si_signo!=sig || !context ||
        !sigismember(&mask,SIGUSR1) || sigismember(&mask,SIGILL)==nodefer) bad=1;
+    if(mask_faults && (!sigismember(&mask,SIGBUS) || !sigismember(&mask,SIGSEGV))) bad=1;
     calls++;
     if(oneshot) {
         struct sigaction current;
@@ -47,51 +56,84 @@ static void fault(int sig, siginfo_t *info, void *context) {
     calls++;
     avxemu_context_set_ip(context,avxemu_context_ip(context)+2);
 }
-/* A peer delivers SIGILL while this process is blocked in read. The handler
- * acknowledges through a second pipe, then the peer supplies the input byte. */
-static int interrupted_read(int restart) {
-    int data[2], ack[2], status; char byte;
-    if(pipe(data)||pipe(ack)) return 20;
-    pid_t peer=fork();
-    if(peer<0) return 21;
-    if(!peer) {
-        close(ack[1]); close(data[0]);
-        struct timespec delay={0,20000000}; nanosleep(&delay,0);
-        kill(getppid(),SIGILL);
-        if(read(ack[0],&byte,1)!=1 || write(data[1],"x",1)!=1) _exit(1);
-        _exit(0);
-    }
-    close(ack[0]); close(data[1]);
-    /* The peer delay lets this process enter read; acknowledgment prevents it
-     * from supplying the byte before the signal handler has run. */
-    extern int loader_ack;
-    loader_ack=ack[1];
-    errno=0;
-    ssize_t n=read(data[0],&byte,1); int error=errno;
-    if(n==-1 && error==EINTR) (void)read(data[0],&byte,1);
-    close(data[0]); close(ack[1]);
-    waitpid(peer,&status,0);
-    if(!WIFEXITED(status) || WEXITSTATUS(status)) return 23;
-    return restart ? !(n==1&&byte=='x') : !(n==-1&&error==EINTR);
-}
-int loader_ack;
-static void acknowledge(int sig) {
-    simple(sig);
-    if(write(loader_ack,"a",1)!=1) bad=1;
+/* Real monotonic deadlines remain finite when the host is busy or a sleep is
+ * interrupted. Mavericks predates clock_gettime. */
+static uint64_t monotonic_ms(void) {
+#ifdef __APPLE__
+    mach_timebase_info_data_t scale;
+    if(mach_timebase_info(&scale)!=KERN_SUCCESS) _exit(70);
+    return (uint64_t)((long double)mach_absolute_time()*scale.numer/scale.denom/1000000);
+#else
+    struct timespec now;
+    if(clock_gettime(CLOCK_MONOTONIC,&now)) _exit(70);
+    return (uint64_t)now.tv_sec*1000+(uint64_t)now.tv_nsec/1000000;
+#endif
 }
 /* Parent-side SIGKILL deadlines also cover a child that has blocked every
  * catchable signal while waiting for a broken policy lock. */
 static int wait_child(pid_t child, int *status, int milliseconds) {
+    uint64_t deadline=monotonic_ms()+(unsigned)milliseconds;
     struct timespec tick={0,1000000};
-    for(int elapsed=0;elapsed<milliseconds;elapsed++) {
+    do {
         pid_t result=waitpid(child,status,WNOHANG);
         if(result==child) return 1;
         if(result<0 && errno!=EINTR) return 0;
         nanosleep(&tick,0);
-    }
+    } while(monotonic_ms()<deadline);
     kill(child,SIGKILL);
     while(waitpid(child,status,0)<0 && errno==EINTR) {}
     return 0;
+}
+static volatile sig_atomic_t loader_ack=-1;
+static void acknowledge(int sig) {
+    int saved=errno;
+    simple(sig);
+    if(write(loader_ack,"a",1)!=1) bad=1;
+    errno=saved;
+}
+/* A handshake publishes the acknowledgment FD before delivery. The peer
+ * supplies data only after the handler acknowledges. A successful read in the
+ * non-restart case can mean the signal arrived before read entered the kernel:
+ * that attempt is inconclusive, so retry until EINTR or the real deadline.
+ * Deliberately force the first attempt early to exercise that retry. */
+static int interrupted_read(int restart) {
+    uint64_t deadline=monotonic_ms()+10000;
+    for(int attempt=0;monotonic_ms()<deadline;attempt++) {
+        int data[2],ack[2],ready[2],status;char byte=0;
+        if(pipe(data)||pipe(ack)||pipe(ready)) return 20;
+        loader_ack=ack[1];
+        pid_t peer=fork();
+        if(peer<0) return 21;
+        if(!peer) {
+            close(ack[1]);close(data[0]);close(ready[1]);
+            if(read(ready[0],&byte,1)!=1 || kill(getppid(),SIGILL) ||
+                read(ack[0],&byte,1)!=1 || write(data[1],"x",1)!=1) _exit(1);
+            _exit(0);
+        }
+        close(ack[0]);close(data[1]);close(ready[0]);
+        if(write(ready[1],"r",1)!=1) return 22;
+        close(ready[1]);
+        int reaped=0;
+        if(!attempt) { /* Known early delivery: never counts as contract evidence. */
+            if(!wait_child(peer,&status,2000)) return 23;
+            reaped=1;
+        }
+        errno=0;
+        ssize_t n=read(data[0],&byte,1);int error=errno;
+        if(n==-1 && error==EINTR) {
+            ssize_t drained;
+            do { drained=read(data[0],&byte,1); } while(drained<0 && errno==EINTR);
+            if(drained!=1) return 24;
+        }
+        close(data[0]);close(ack[1]);loader_ack=-1;
+        if(!reaped && !wait_child(peer,&status,2000)) return 23;
+        if(!WIFEXITED(status) || WEXITSTATUS(status)) return 23;
+        if(!attempt) continue;
+        if(restart) return !(n==1 && byte=='x');
+        if(n==-1 && error==EINTR) return 0;
+        if(n!=1 || byte!='x') return 25;
+    }
+    return 26; /* No conclusive interrupt before the deadline. */
 }
 
 /* Registration and queries race on four application threads. The coordinator
@@ -226,7 +268,7 @@ static int oneshot_race(void) {
             raise(SIGILL);
             _exit(replacement_calls==2?0:38);
         }
-        if(p<0 || !wait_child(p,&status,2000)) return 39;
+        if(p<0 || !wait_child(p,&status,5000)) return 39;
         if(!((WIFSIGNALED(status)&&WTERMSIG(status)==SIGILL) ||
              (WIFEXITED(status)&&WEXITSTATUS(status)==0))) {
             fprintf(stderr,"FAIL one-shot attempt %d status %x\n",attempt,status);
@@ -265,7 +307,7 @@ static int fork_registration_race(void) {
         if(!p) {
             struct sigaction app,kernel;
             pthread_t recovery[RACE_THREADS];
-            alarm(2);
+            alarm(5);
             /* Race the child's first policy entries as well as the fork. */
             for(int i=0;i<RACE_THREADS;i++)
                 if(pthread_create(&recovery[i],0,child_recovery_worker,0)) _exit(49);
@@ -286,7 +328,7 @@ static int fork_registration_race(void) {
             }
             _exit(0);
         }
-        if(p<0 || !wait_child(p,&status,2000) || !WIFEXITED(status) || WEXITSTATUS(status)) {
+        if(p<0 || !wait_child(p,&status,5000) || !WIFEXITED(status) || WEXITSTATUS(status)) {
             fprintf(stderr,"FAIL fork attempt %d status %x\n",attempt,status);
             fail=1; break;
         }
@@ -300,9 +342,49 @@ static int child(int mode) {
     struct sigaction a,o,k;
     memset(&a,0,sizeof a); sigemptyset(&a.sa_mask);
     a.sa_handler=simple; a.sa_flags=SA_RESTART;
+    if(mode>=19) {
+        a.sa_flags=SA_RESTART|SA_NODEFER;
+        a.sa_handler=mode==19?SIG_DFL:SIG_IGN;
+        sigaddset(&a.sa_mask,SIGBUS); sigaddset(&a.sa_mask,SIGSEGV);
+        if(mode>=21) {
+            mask_faults=1; a.sa_sigaction=detailed; a.sa_flags=SA_SIGINFO|SA_RESTART;
+            sigaddset(&a.sa_mask,SIGUSR1);
+        }
+        /* Capture the kernel's canonical record (glibc adds SA_RESTORER)
+         * before activation; ownership must preserve that exact query. */
+        if(avxemu_sigaction(SIGILL,&a,0) || avxemu_sigaction(SIGILL,0,&a)) return 60;
+    }
     if(mode==0 && avxemu_sigaction(SIGILL,&a,0)) return 10;
     setenv("AVXEMU_FORCEPATCH","1",1);
     avxemu_force_install();
+    if(mode>=19) {
+        if(avxemu_sigaction(SIGILL,0,&o) || o.sa_flags!=a.sa_flags ||
+           o.sa_handler!=a.sa_handler || !sigismember(&o.sa_mask,SIGBUS) ||
+           !sigismember(&o.sa_mask,SIGSEGV)) return 61;
+        avxemu_test_ud2=1;
+        if(e2e_shlx(7,3)!=56 || calls) return 62;
+        if(mode>=21) { raise(SIGILL); if(calls!=1 || bad) return 63; }
+        if(mode==22) {
+            /* A caller-blocked pending fault signal must stay pending through
+             * recognized emulation, even with a callback mask installed. */
+            sigset_t blocked, saved, pending;
+            struct sigaction bus; memset(&bus,0,sizeof bus);
+            sigemptyset(&bus.sa_mask); bus.sa_handler=simple;
+            sigemptyset(&blocked); sigaddset(&blocked,SIGBUS);
+            expected_signal=SIGBUS; calls=0;
+            if(avxemu_sigaction(SIGBUS,&bus,0) ||
+               sigprocmask(SIG_BLOCK,&blocked,&saved) || raise(SIGBUS) ||
+               e2e_shlx(9,2)!=36 || calls || sigpending(&pending) ||
+               !sigismember(&pending,SIGBUS)) return 66;
+            if(sigprocmask(SIG_SETMASK,&saved,0) || calls!=1 || bad) return 67;
+            return 0;
+        }
+        size_t page=(size_t)sysconf(_SC_PAGESIZE);
+        unsigned char *mem=mmap(0,page*2,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+        if(mem==MAP_FAILED || mprotect(mem+page,page,PROT_NONE)) return 64;
+        guard_operand(mem+page-16);
+        return 65; /* genuine operand fault must terminate this child */
+    }
     if(mode==16) return registration_race();
     if(mode==17) return oneshot_race();
     if(mode==18) return fork_registration_race();
@@ -324,7 +406,7 @@ static int child(int mode) {
     if(public_sigaction(SIGILL,&a,&o) || public_sigaction(SIGILL,0,&o)) return 13;
     if(o.sa_handler!=a.sa_handler || o.sa_flags!=a.sa_flags || sigismember(&o.sa_mask,SIGUSR1)!=sigismember(&a.sa_mask,SIGUSR1)) return 14;
     if(avxemu_real_sigaction(SIGILL,0,&k) || k.sa_handler==a.sa_handler ||
-       (k.sa_flags&SA_RESTART)!=(a.sa_flags&SA_RESTART)) return 15;
+       (k.sa_flags&SA_RESTART)!=((mode==2 || mode==3)?0:(a.sa_flags&SA_RESTART))) return 15;
     if(mode==9 || mode==10) return interrupted_read(mode==9)||bad;
     if(mode==11) {
         if(public_signal(SIGILL,simple)!=simple || avxemu_sigaction(SIGILL,0,&o) || !(o.sa_flags&SA_RESTART)) return 19;
@@ -359,16 +441,16 @@ int main(void) {
     static const char *names[]={"pre-activation", "siginfo-mask", "ignore-raised", "default-ud2",
         "one-shot-death", "siginfo-ud2", "simple", "nodefer-recursion", "one-shot-query",
         "restart-read", "interrupt-read", "signal-wrapper", "aliased-query",
-        "segv-ownership", "bus-ownership", "emulation-keeps-one-shot", "registration-race", "one-shot-race", "fork-registration-race"};
-    for(int mode=0;mode<19;mode++) {
+        "segv-ownership", "bus-ownership", "emulation-keeps-one-shot", "registration-race", "one-shot-race", "fork-registration-race", "default-mask-operand", "ignored-mask-operand", "callback-mask-operand", "caller-mask-pending"};
+    for(int mode=0;mode<23;mode++) {
         pid_t p=fork(); int status=0;
         if(!p) _exit(child(mode));
-        if(p<0 || !wait_child(p,&status,20000)) {
+        if(p<0 || !wait_child(p,&status,(mode==17 || mode==18)?120000:20000)) {
             printf("FAIL loader %s timed out or could not be waited for\n",names[mode]);
             fail++; continue;
         }
-        int ok=(mode==3||mode==4)?WIFSIGNALED(status)&&WTERMSIG(status)==SIGILL:WIFEXITED(status)&&WEXITSTATUS(status)==0;
+        int ok=mode>=19 && mode<22 ? WIFSIGNALED(status)&&(WTERMSIG(status)==SIGSEGV||WTERMSIG(status)==SIGBUS) : (mode==3||mode==4)?WIFSIGNALED(status)&&WTERMSIG(status)==SIGILL:WIFEXITED(status)&&WEXITSTATUS(status)==0;
         if(!ok) { printf("FAIL loader %s status %x\n",names[mode],status); fail++; }
     }
-    printf("loader-contract: %s (19 isolated delivery cases)\n",fail?"FAIL":"PASS"); return !!fail;
+    printf("loader-contract: %s (23 isolated delivery cases)\n",fail?"FAIL":"PASS"); return !!fail;
 }

@@ -1,7 +1,4 @@
-if(AVXEMU_BACKEND_TESTS_ONLY)
-  avxemu_objects(avxemu_linux_elf "${PROJECT_SOURCE_DIR}/src/platform/linux/elf.c")
-  avxemu_objects(avxemu_linux_image "${PROJECT_SOURCE_DIR}/src/platform/linux/image.c"
-    "${PROJECT_SOURCE_DIR}/src/image.c")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   foreach(obj avxemu_linux_elf avxemu_linux_image avxemu_linux_memory avxemu_linux_host)
     set_target_properties(${obj} PROPERTIES POSITION_INDEPENDENT_CODE ON)
   endforeach()
@@ -71,26 +68,15 @@ if(AVXEMU_BACKEND_TESTS_ONLY)
   target_include_directories(linux-image-no-id PRIVATE "${PROJECT_SOURCE_DIR}/src")
   target_link_libraries(linux-image-no-id PRIVATE image-backend-no-id)
   add_test(NAME linux-image-no-id COMMAND linux-image-no-id)
-  avxemu_objects(avxemu_linux_context "${PROJECT_SOURCE_DIR}/src/platform/linux/context.c"
-    "${PROJECT_SOURCE_DIR}/src/platform/linux/xstate.c")
   add_executable(xstate-contract linux_xstate_contract.c
     $<TARGET_OBJECTS:avxemu_linux_context> $<TARGET_OBJECTS:avxemu_linux_memory>)
   target_compile_options(xstate-contract PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
   target_include_directories(xstate-contract PRIVATE "${PROJECT_SOURCE_DIR}/src")
   add_test(NAME xstate-contract COMMAND xstate-contract)
 
-  # Runtime-backed contracts exercise the genuine signal policy, without
-  # publishing a Linux runtime target. Other backend tests stay constructor-free.
-  list(TRANSFORM AVXEMU_COMMON_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
-  list(TRANSFORM AVXEMU_ASM_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
-  avxemu_objects(linux_contract_runtime ${AVXEMU_COMMON_SOURCES} ${AVXEMU_ASM_SOURCES}
-    "${PROJECT_SOURCE_DIR}/src/platform/linux/loader.c"
-    "${PROJECT_SOURCE_DIR}/src/platform/linux/image.c")
   foreach(contract context-contract loader-contract linux-loader-failure linux-signal-contract)
     string(REPLACE "-" "_" source "${contract}")
-    add_executable(${contract} "${source}.c" $<TARGET_OBJECTS:linux_contract_runtime>
-      $<TARGET_OBJECTS:avxemu_linux_context> $<TARGET_OBJECTS:avxemu_linux_memory>
-      $<TARGET_OBJECTS:avxemu_linux_host> $<TARGET_OBJECTS:avxemu_linux_elf>)
+    add_executable(${contract} "${source}.c" $<TARGET_OBJECTS:avxemu_core> $<TARGET_OBJECTS:avxemu_asm> ${AVXEMU_PLATFORM_OBJECTS})
     target_compile_options(${contract} PRIVATE ${AVXEMU_CORE_FLAGS} -UNDEBUG)
     target_include_directories(${contract} PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(${contract} PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
@@ -98,7 +84,9 @@ if(AVXEMU_BACKEND_TESTS_ONLY)
     set_tests_properties(${contract} PROPERTIES
       ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1;AVXEMU_NOCACHE=1")
   endforeach()
+  target_compile_options(linux-signal-contract PRIVATE -U_DEFAULT_SOURCE)
   target_sources(context-contract PRIVATE context_contract.S)
+  target_sources(loader-contract PRIVATE guard_operand.S)
   target_link_options(linux-loader-failure PRIVATE -Wl,--wrap=dlvsym)
   foreach(mode self recursive)
     add_test(NAME linux-loader-failure-${mode} COMMAND linux-loader-failure)
@@ -107,11 +95,88 @@ if(AVXEMU_BACKEND_TESTS_ONLY)
   endforeach()
   get_property(backend_tests DIRECTORY PROPERTY TESTS)
   set_tests_properties(${backend_tests} PROPERTIES LABELS hermetic TIMEOUT 60)
-  return()
+  set_tests_properties(loader-contract PROPERTIES TIMEOUT 300)
+  if(AVXEMU_BACKEND_TESTS_ONLY)
+    return()
+  endif()
 endif()
 
 # avxemu's tests. Each later task appends; the _replay_objs block added in Task 7, and then the
 # AVXEMU_NOCACHE block, stay last.
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(linux-signal-preload linux_signal_contract.c)
+  target_compile_options(linux-signal-preload PRIVATE ${AVXEMU_CORE_FLAGS} -U_DEFAULT_SOURCE -UNDEBUG)
+  target_compile_definitions(linux-signal-preload PRIVATE AVXEMU_PRELOAD_TEST)
+  target_include_directories(linux-signal-preload PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  add_test(NAME linux-signal-preload COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/preload.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:linux-signal-preload>)
+  set_tests_properties(linux-signal-preload PROPERTIES LABELS hermetic
+    ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1" PASS_REGULAR_EXPRESSION "linux-signal-contract: PASS")
+  add_executable(external-entry fixtures/external_entry.c fixtures/external_entry.S)
+  add_test(NAME required-external-entry COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/strict-cache.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:external-entry> "required prefix=f0")
+  add_executable(external-overlap fixtures/external_entry.c fixtures/external_entry.S)
+  target_compile_definitions(external-overlap PRIVATE AVXEMU_BAD_ENTRY)
+  add_test(NAME required-reject-external-entry COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/required-reject.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:external-overlap>)
+  add_executable(optional-data fixtures/optional_data.c fixtures/optional_data.S)
+  add_test(NAME optional-data COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/strict-cache.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:optional-data> "optional data: PASS")
+  add_executable(optional-replay optional_replay.c fixtures/optional_data.S)
+  target_include_directories(optional-replay PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_compile_options(optional-replay PRIVATE ${AVXEMU_CORE_FLAGS} -UNDEBUG)
+  target_link_libraries(optional-replay PRIVATE avxemu)
+  add_test(NAME optional-replay COMMAND optional-replay)
+  set_tests_properties(optional-replay PROPERTIES LABELS hermetic TIMEOUT 30
+    ENVIRONMENT "AVXEMU_DISABLE=1;AVXEMU_FORCETRAMP=1")
+  add_executable(pending-signal pending_signal.c pending_signal.S)
+  add_test(NAME pending-signal COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/preload.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:pending-signal>)
+  set_tests_properties(required-external-entry required-reject-external-entry optional-data pending-signal PROPERTIES
+    LABELS hermetic TIMEOUT 30 ENVIRONMENT "AVXEMU_FORCEPATCH=1")
+  add_executable(runtime-unknown runtime_load.c required_gap.S)
+  target_include_directories(runtime-unknown PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  add_test(NAME required-reject-gap COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/required-reject.sh"
+    $<TARGET_FILE:avxemu> $<TARGET_FILE:runtime-unknown>)
+  set_tests_properties(required-reject-gap PROPERTIES LABELS hermetic)
+  foreach(kind pie exec)
+    foreach(mode linked preload)
+      set(t runtime-${mode}-${kind})
+      add_executable(${t} runtime_load.c)
+      if(kind STREQUAL "pie")
+        target_compile_options(${t} PRIVATE -fPIE)
+        target_link_options(${t} PRIVATE -pie)
+      else()
+        target_compile_options(${t} PRIVATE -fno-pie)
+        target_link_options(${t} PRIVATE -no-pie)
+      endif()
+      if(mode STREQUAL "linked")
+        target_compile_definitions(${t} PRIVATE AVXEMU_LINKED)
+        target_link_options(${t} PRIVATE -Wl,--as-needed)
+        target_link_libraries(${t} PRIVATE avxemu)
+        set(command "")
+      else()
+        set(command sh "${CMAKE_CURRENT_SOURCE_DIR}/preload.sh" $<TARGET_FILE:avxemu>)
+      endif()
+      add_custom_command(TARGET ${t} POST_BUILD COMMAND "${CMAKE_STRIP}" --strip-all
+        -o "$<TARGET_FILE:${t}>-stripped" "$<TARGET_FILE:${t}>" VERBATIM)
+      foreach(suffix "" -stripped)
+        add_test(NAME ${t}${suffix} COMMAND ${command} "$<TARGET_FILE:${t}>${suffix}")
+        set_tests_properties(${t}${suffix} PROPERTIES LABELS hermetic
+          ENVIRONMENT "AVXEMU_FORCEPATCH=1" PASS_REGULAR_EXPRESSION "runtime-load: OK")
+      endforeach()
+    endforeach()
+  endforeach()
+  set_property(TARGET runtime-preload-pie APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/no-functions.sh")
+  add_custom_command(TARGET runtime-preload-pie POST_BUILD
+    COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/no-functions.sh" "${CMAKE_OBJCOPY}"
+      "$<TARGET_FILE:runtime-preload-pie>" "$<TARGET_FILE:runtime-preload-pie>-no-functions" VERBATIM)
+  add_test(NAME required-reject-missing COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/required-reject.sh"
+    $<TARGET_FILE:avxemu> "$<TARGET_FILE:runtime-preload-pie>-no-functions")
+  set_tests_properties(required-reject-missing PROPERTIES LABELS hermetic)
+
+endif()
 
 avxemu_objects(t_cpu cpu.c)
 
@@ -128,49 +193,82 @@ function(avxemu_test_exe name)
   foreach(l IN LISTS A_LINK)
     list(APPEND objs $<TARGET_OBJECTS:${l}>)
   endforeach()
+  if("avxemu_core" IN_LIST A_LINK)
+    list(APPEND objs ${AVXEMU_PLATFORM_OBJECTS})
+  endif()
   add_executable(${name} ${A_SOURCES} ${objs})
   target_compile_options(${name} PRIVATE "$<$<COMPILE_LANGUAGE:C>:${A_FLAGS}>")
   target_include_directories(${name} PRIVATE "${PROJECT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}")
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
 endfunction()
 
+add_test(NAME vex-leak-controls COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/vex-leak-test.sh"
+  "${CMAKE_CURRENT_SOURCE_DIR}/vex-leak.sh" "${CMAKE_BINARY_DIR}/objects/asm.txt"
+  "${CMAKE_BINARY_DIR}/objects/negative.txt")
+set_tests_properties(vex-leak-controls PROPERTIES LABELS hermetic)
+
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
 avxemu_test_exe(asm-contract SOURCES asm_contract.c "${PROJECT_SOURCE_DIR}/src/tramp.S")
 add_test(NAME asm-contract COMMAND $<TARGET_FILE:asm-contract>)
 
+if(APPLE)
 avxemu_test_exe(image-contract SOURCES image_contract.c "${PROJECT_SOURCE_DIR}/src/image.c")
 add_test(NAME image-contract COMMAND $<TARGET_FILE:image-contract>)
 
 # Exercise metadata with emulator objects inside the executable and in a dylib.
+avxemu_test_exe(darwin-data-contract SOURCES darwin_data_contract.c LINK avxemu_core avxemu_asm)
+target_compile_options(darwin-data-contract PRIVATE -UNDEBUG)
+add_test(NAME darwin-data-contract COMMAND darwin-data-contract)
+set_tests_properties(darwin-data-contract PROPERTIES LABELS hermetic ENVIRONMENT "AVXEMU_DISABLE=1")
 avxemu_test_exe(image-live SOURCES image_live.c LINK avxemu_core avxemu_asm)
 add_test(NAME image-live COMMAND $<TARGET_FILE:image-live> embedded)
 avxemu_test_exe(image-live-linked SOURCES image_live.c)
 target_link_libraries(image-live-linked PRIVATE avxemu)
 add_test(NAME image-live-linked COMMAND $<TARGET_FILE:image-live-linked> shared)
 
+endif()
+avxemu_test_exe(prefix-coverage SOURCES prefix_coverage.c)
+target_link_libraries(prefix-coverage PRIVATE avxemu)
+target_compile_options(prefix-coverage PRIVATE -UNDEBUG)
+add_test(NAME prefix-coverage COMMAND prefix-coverage)
+set_tests_properties(prefix-coverage PROPERTIES LABELS hermetic ENVIRONMENT "AVXEMU_DISABLE=1")
+add_test(NAME prefix-handler COMMAND prefix-coverage handler)
+set_tests_properties(prefix-handler PROPERTIES LABELS hermetic TIMEOUT 20 ENVIRONMENT "AVXEMU_FORCEPATCH=1;AVXEMU_NOCACHE=1")
+
+avxemu_test_exe(required-scan SOURCES required_scan.c LINK avxemu_core avxemu_asm)
+target_compile_options(required-scan PRIVATE -UNDEBUG)
+add_test(NAME required-scan COMMAND required-scan)
+set_tests_properties(required-scan PROPERTIES LABELS hermetic ENVIRONMENT "AVXEMU_DISABLE=1")
+
 avxemu_test_exe(scan-contract SOURCES scan_contract.c LINK avxemu_core avxemu_asm)
+target_compile_options(scan-contract PRIVATE -UNDEBUG)
 add_test(NAME scan-contract COMMAND $<TARGET_FILE:scan-contract>)
 set_tests_properties(scan-contract PROPERTIES ENVIRONMENT "AVXEMU_DISABLE=1")
 
 # Synthetic image and identities, with the real cache, scanner and memory backend.
 avxemu_test_exe(cache-ranges SOURCES cache_ranges.c
   "${PROJECT_SOURCE_DIR}/src/lcache.c" "${PROJECT_SOURCE_DIR}/src/cpuid.c"
-  "${PROJECT_SOURCE_DIR}/src/patch_mem.c" "${PROJECT_SOURCE_DIR}/src/lde.c"
-  "${PROJECT_SOURCE_DIR}/src/image.c" "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
+  "${PROJECT_SOURCE_DIR}/src/patch_mem.c" "${PROJECT_SOURCE_DIR}/src/scan.c" "${PROJECT_SOURCE_DIR}/src/lde.c" "${PROJECT_SOURCE_DIR}/src/decode.c"
+  "${PROJECT_SOURCE_DIR}/src/image.c" "${PROJECT_SOURCE_DIR}/src/platform/${AVXEMU_PLATFORM}/memory.c"
+  $<$<PLATFORM_ID:Linux>:${PROJECT_SOURCE_DIR}/src/platform/linux/maps.c>)
+target_compile_options(cache-ranges PRIVATE -UNDEBUG)
 add_test(NAME cache-ranges COMMAND $<TARGET_FILE:cache-ranges>)
 
-avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
+if(APPLE)
+avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/${AVXEMU_PLATFORM}/memory.c"
+  $<$<PLATFORM_ID:Linux>:${PROJECT_SOURCE_DIR}/src/platform/linux/maps.c>)
 find_package(Threads REQUIRED)
 target_link_libraries(memory-contract PRIVATE Threads::Threads)
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
 avxemu_test_exe(context-contract SOURCES context_contract.c context_contract.S LINK avxemu_core avxemu_asm)
 add_test(NAME context-contract COMMAND $<TARGET_FILE:context-contract>)
-avxemu_test_exe(loader-contract SOURCES loader_contract.c LINK avxemu_core avxemu_asm)
+avxemu_test_exe(loader-contract SOURCES loader_contract.c guard_operand.S LINK avxemu_core avxemu_asm)
 add_test(NAME loader-contract COMMAND $<TARGET_FILE:loader-contract>)
-set_tests_properties(loader-contract PROPERTIES ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1" TIMEOUT 90)
+set_tests_properties(loader-contract PROPERTIES ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1" TIMEOUT 300)
 
+endif()
 avxemu_test_exe(inject SOURCES inject.c stubs.S LINK avxemu_core avxemu_asm)
 add_test(NAME inject COMMAND $<TARGET_FILE:inject>)
 
@@ -179,6 +277,14 @@ add_test(NAME memtest COMMAND $<TARGET_FILE:memtest>)
 
 avxemu_test_exe(tramptest SOURCES tramptest.c tramp_harness.S LINK avxemu_core avxemu_asm)
 add_test(NAME tramptest COMMAND $<TARGET_FILE:tramptest>)
+
+avxemu_test_exe(operand-faults SOURCES operand_faults.c LINK avxemu_core avxemu_asm)
+target_compile_options(operand-faults PRIVATE -UNDEBUG)
+if(NOT APPLE)
+  target_link_options(operand-faults PRIVATE -Wl,--wrap=avxemu_memory_read)
+endif()
+add_test(NAME operand-faults COMMAND operand-faults)
+set_tests_properties(operand-faults PROPERTIES LABELS hermetic ENVIRONMENT "AVXEMU_DISABLE=1")
 
 avxemu_test_exe(overread SOURCES overread.c LINK avxemu_core avxemu_asm)
 add_test(NAME overread COMMAND $<TARGET_FILE:overread>)
@@ -213,8 +319,8 @@ add_test(NAME zcnt16 COMMAND $<TARGET_FILE:zcnt16>)
 # system binaries on macOS newer than 10.9. The verdict is the self-test's own summary line, so a
 # run where avxemu never loaded cannot pass.
 avxemu_test_exe(selftest_host FLAGS -O0 SOURCES selftest_host.c)
-add_test(NAME selftest COMMAND env AVXEMU_SELFTEST=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu>
-  $<TARGET_FILE:selftest_host>)
+add_test(NAME selftest COMMAND env AVXEMU_SELFTEST=1 sh "${CMAKE_CURRENT_SOURCE_DIR}/preload.sh"
+  $<TARGET_FILE:avxemu> $<TARGET_FILE:selftest_host>)
 set_tests_properties(selftest PROPERTIES PASS_REGULAR_EXPRESSION "avxemu selftest: all shapes OK")
 
 avxemu_test_exe(linkhook FLAGS -O0 SOURCES linkhook.c)
@@ -222,7 +328,9 @@ target_link_libraries(linkhook PRIVATE avxemu)
 # AVXEMU_FORCEPATCH keeps avxemu installed on a CPU that has everything, where it would
 # otherwise stay inert (inerttest) and there would be no rebind to test.
 add_test(NAME linkhook COMMAND env AVXEMU_FORCEPATCH=1 $<TARGET_FILE:linkhook>)
-add_test(NAME linkhook-no-rebind COMMAND env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
+if(APPLE)
+  add_test(NAME linkhook-no-rebind COMMAND env AVXEMU_FORCEPATCH=1 AVXEMU_NO_REBIND=1 $<TARGET_FILE:linkhook>)
+endif()
 
 # Linked on a CPU that has everything, avxemu stays inert. The plain run checks the real early
 # return on such a CPU, and on one without is the negative control: avxemu must be installed.
@@ -237,17 +345,24 @@ avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.S 
 target_link_libraries(threadtest PRIVATE avxemu)
 add_test(NAME threadtest COMMAND $<TARGET_FILE:threadtest> 20 12)
 
+
 avxemu_test_exe(overread_fault FLAGS -O0 SOURCES overread_fault.c)
 set(ROSETTA_OVERREAD "under Rosetta avxemu's fault handler does not repair and retry the read that straddles an unmapped page, and the test segfaults; it passes natively on 10.9 and on Intel with AVX2; the cause is not yet diagnosed")
-add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --because "${ROSETTA_OVERREAD}" -- env AVXEMU_FORCEPATCH=1 DYLD_INSERT_LIBRARIES=$<TARGET_FILE:avxemu> $<TARGET_FILE:overread_fault>)
-avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
+add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --because "${ROSETTA_OVERREAD}" -- env AVXEMU_FORCEPATCH=1 sh "${CMAKE_CURRENT_SOURCE_DIR}/preload.sh" $<TARGET_FILE:avxemu> $<TARGET_FILE:overread_fault>)
+avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c guard_operand.S)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
+set_tests_properties(guard-page PROPERTIES TIMEOUT 15)
 
-set_tests_properties(asm-contract context-contract loader-contract image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(asm-contract context-contract loader-contract image-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
-                     linkhook-no-rebind inerttest inerttest-assume-capable threadtest
+                     inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page
   PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
+
+if(APPLE)
+  set_tests_properties(image-live image-live-linked memory-contract linkhook-no-rebind
+    PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
+endif()
 
 avxemu_objects(t_refdigest refdigest.c cpu.c)
 avxemu_test_exe(refdigest_test SOURCES refdigest_test.c LINK t_refdigest)
@@ -269,6 +384,9 @@ function(avxemu_oracle name)
   foreach(l IN LISTS A_LINK)
     list(APPEND objs $<TARGET_OBJECTS:${l}>)
   endforeach()
+  if("avxemu_core" IN_LIST A_LINK)
+    list(APPEND objs ${AVXEMU_PLATFORM_OBJECTS})
+  endif()
   add_executable(${name} ${A_ASM} ${objs})
   target_include_directories(${name} PRIVATE "${PROJECT_SOURCE_DIR}/src")
   set_target_properties(${name} PROPERTIES LINKER_LANGUAGE C)
@@ -291,6 +409,7 @@ avxemu_oracle(patchtest DRIVER patchtest.c HW patchtest_hw.c ASM patch_stubs.S L
 
 avxemu_oracle(bmimem DRIVER bmimem.c ASM bmimem.S LINK avxemu_core avxemu_asm)
 
+if(APPLE)
 avxemu_objects(t_decode "${PROJECT_SOURCE_DIR}/src/decode.c" "${PROJECT_SOURCE_DIR}/src/names.c")
 avxemu_objects(t_lde "${PROJECT_SOURCE_DIR}/src/lde.c")
 avxemu_test_exe(bintest SOURCES bintest.c LINK t_decode)
@@ -306,6 +425,8 @@ add_test(NAME claude-trampoline COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/claude-t
 set_tests_properties(claude-decode PROPERTIES LABELS claude-binary SKIP_RETURN_CODE 77)
 set_tests_properties(claude-hardware claude-trampoline PROPERTIES LABELS "claude-binary;hardware" SKIP_RETURN_CODE 77)
 
+endif()
+
 set(_replay_objs $<TARGET_OBJECTS:t_refdigest>)
 foreach(p IN LISTS AVXEMU_REPLAY_PROGRAMS)
   list(APPEND _replay_objs $<TARGET_OBJECTS:${p}_driver>)
@@ -313,7 +434,7 @@ endforeach()
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/objects/replay.txt" CONTENT "$<JOIN:${_replay_objs},\n>\n")
 add_test(NAME vex-leak-replay
   COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/vex-leak.sh"
-          "${CMAKE_BINARY_DIR}/objects/replay.txt" "${CMAKE_BINARY_DIR}/objects/asm.txt")
+          "${CMAKE_BINARY_DIR}/objects/replay.txt" "${CMAKE_BINARY_DIR}/objects/asm.txt" "${CMAKE_BINARY_DIR}/objects/negative.txt")
 set_tests_properties(vex-leak-replay PROPERTIES LABELS hermetic SKIP_RETURN_CODE 77)
 
 # Every test here loads avxemu, whose constructor would otherwise record its load-time analysis

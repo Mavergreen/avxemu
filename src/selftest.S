@@ -87,7 +87,7 @@ AVXEMU_FUNCTION(e2e_st_andn_mem)
 AVXEMU_END_FUNCTION(e2e_st_andn_mem)
 
 // Patched-form lzcnt/tzcnt: the exact bytes the in-memory patcher emits (F3
-// prefix rewritten to F0/lock). No ud2 — `lock bsr/bsf` //UDs on its own, just
+// prefix rewritten to F0/lock). No ud2 — `lock bsr/bsf` #UDs on its own, just
 // as the patched instruction does on the target, so this exercises the real
 // fault path the patcher relies on. rdi=src -> rax.
 AVXEMU_FUNCTION(e2e_patched_lzcnt)

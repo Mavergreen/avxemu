@@ -14,14 +14,6 @@
 typedef int (*lde_trap_lookup)(uintptr_t address);
 
 enum { LDE_LZCNT = 1, LDE_TZCNT = 2, LDE_CPUID = 4 };
-/* Darwin retains its established linear-first discovery. ELF executable
- * segments also contain data, so discovery follows reachable instructions. */
-#ifdef __APPLE__
-#define AVXEMU_SCAN_RECURSIVE 0
-#else
-#define AVXEMU_SCAN_RECURSIVE 1
-#endif
-
 /* Discover selected operations without editing. Offsets are relative to text.
  * Return -1 if storage is insufficient or discovery cannot be completed; no
  * caller may edit any sites in that case. recursive skips unreachable bytes.
@@ -29,6 +21,12 @@ enum { LDE_LZCNT = 1, LDE_TZCNT = 2, LDE_CPUID = 4 };
 long lde_scan_sites(const uint8_t *text, size_t begin, size_t end,
                     size_t readable, unsigned required, int recursive,
                     size_t *out, size_t capacity, lde_trap_lookup traps);
+/* Shared masked collector for legacy function scans and partial range mop-up.
+ * excluded/selected are indexed by text offsets. On failure selected may be
+ * partial; callers discard a failed function attempt before recursive fallback. */
+long lde_collect_zcnt(const uint8_t *text, size_t begin, size_t end,
+    size_t readable, unsigned required, int recursive, const uint8_t *excluded,
+    uint8_t *selected, int partial, lde_trap_lookup traps);
 long lde_scan_zcnt_mask(uint8_t *text, size_t n, int patch, unsigned required);
 long lde_scan_func_mask(uint8_t *text, size_t begin, size_t end, size_t readable,
                         int patch, unsigned required, int recursive,
@@ -78,6 +76,18 @@ void lde_cflow(const uint8_t *p, const uint8_t *end, int len, long insn_off,
  */
 /* Owned nonterminating UD2 traps are distinguished from genuine UD2. The
  * callback is read-only and optional; the legacy map wrapper passes NULL. */
+/* Required-operation proof: follow only direct edges/call fallthrough,
+ * never heuristic switch entries. has_indirect covers every indirect CALL/JMP;
+ * callers must prove candidate coverage before treating unmapped bytes as safe.
+ * Optional data[fend-fstart] marks authoritative non-code bytes. Fallthrough
+ * stops there; an entry, decoded instruction or direct target into data fails. */
+int lde_rd_map_direct(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
+                      uint8_t *code, uint8_t *tgt, int *has_indirect,
+                      lde_trap_lookup traps, const uint8_t *data);
+/* Additional independently established direct-entry roots, function-relative. */
+int lde_rd_map_direct_roots(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
+    uint8_t *code, uint8_t *tgt, int *has_indirect, lde_trap_lookup traps,
+    const uint8_t *data, const uint8_t *entries);
 int lde_rd_map_traps(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
                      uint8_t *code, uint8_t *tgt, int *has_indirect,
                      lde_trap_lookup traps);

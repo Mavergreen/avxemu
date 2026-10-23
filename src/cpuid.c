@@ -2,6 +2,7 @@
 #include "avxemu_cpuid.h"
 #include "asm.h"
 #include "lde.h"
+#include "scan.h"
 #include "lcache.h"
 #include <stdlib.h>
 #include <string.h>
@@ -21,6 +22,15 @@ static uint32_t g_l1ecx_set, g_l1ecx_clr, g_l7ebx_set, g_l7ebx_clr;
 AVXEMU_RAW_ATTR
 void avxemu_cpuid_raw(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
     __asm__ volatile("cpuid" : "=a"(r[0]), "=b"(r[1]), "=c"(r[2]), "=d"(r[3]) : "a"(leaf), "c"(sub));
+}
+int avxemu_cpu_baseline(void) {
+    uint32_t r[4];
+    if (!avxemu_get_cpuid(1, 0, r)) return 0;
+    const uint32_t needed = (1u << 20) | (1u << 27) | (1u << 28);
+    if ((r[2] & needed) != needed) return 0;
+    uint32_t lo, hi;
+    __asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(0));
+    return (lo & 6) == 6;
 }
 /* __get_cpuid's contract: 0 if `leaf` is past the CPU's maximum. */
 int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]) {
@@ -91,16 +101,24 @@ int avxemu_cpuid_handle(avxemu_regfile *rf) {
 }
 
 long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
-    if (!image) return 0;
+    if (!image || !avxemu_image_data_valid(image)) return 0;
     size_t available = sizeof g_cpuid_addrs / sizeof g_cpuid_addrs[0] - g_cpuid_count;
     size_t *sites = malloc((available ? available : 1) * sizeof *sites);
     if (!sites) { avxemu_lc_rec_fail(); return 0; }
+    avxemu_scan *scan=image->strategy==AVXEMU_SCAN_STRICT ?
+        avxemu_scan_prepare(image,avxemu_cpuid_trap,AVXEMU_SCAN_WORK_LIMIT):0;
+    if(image->strategy==AVXEMU_SCAN_STRICT && !scan) {
+        if(avxemu_lc_mode==LC_REPLAY) avxemu_lc_invalid();
+        avxemu_lc_rec_fail();free(sites);return 0;
+    }
     if (avxemu_lc_mode == LC_REPLAY) {
         const lc_site *cached; uint32_t n = avxemu_lc_cpuid(&cached);
         int valid = n <= available;
         for (uint32_t i = 0; i < n && valid; i++) {
             uint8_t *p = avxemu_lc_resolve(image, cached[i], 2);
-            valid = p && p[0] == 0x0f && p[1] == 0xa2;
+            valid = p && p[0] == 0x0f && p[1] == 0xa2 &&
+                (image->strategy!=AVXEMU_SCAN_STRICT ||
+                 avxemu_scan_span(scan,(uintptr_t)p,2));
         }
         if (!valid) avxemu_lc_invalid();
     }
@@ -115,7 +133,7 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
                 if (cached[i].range == ri) sites[count++] = (size_t)cached[i].off;
         } else ok = 0;
         if (!ok) {
-            if (!recursive) {
+            if (!recursive && image->strategy!=AVXEMU_SCAN_STRICT) {
                 long n = lde_scan_sites(range->base, 0, range->size, range->readable,
                                         LDE_CPUID, 0, sites, available, avxemu_cpuid_trap);
                 if (n < 0) { avxemu_lc_rec_fail(); continue; }
@@ -129,7 +147,17 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
                     uintptr_t raw = (uintptr_t)avxemu_cpuid_raw;
                     if (raw >= (uintptr_t)range->base + f->begin &&
                         raw < (uintptr_t)range->base + f->end) continue;
-                    long n = lde_scan_sites(range->base, f->begin, f->end, range->readable,
+                    long n;
+                    if(image->strategy==AVXEMU_SCAN_STRICT) {
+                        size_t size=f->end-f->begin;
+                        const avxemu_scan_map *map=avxemu_scan_function(scan,fi);
+                        n=0;
+                        for(size_t off=0;off+1<size;off++) if(map->code[off] &&
+                            range->base[f->begin+off]==0x0f && range->base[f->begin+off+1]==0xa2) {
+                            if(count+(size_t)n==available) { n=-1;break; }
+                            sites[count+(size_t)n++]=f->begin+off;
+                        }
+                    } else n = lde_scan_sites(range->base, f->begin, f->end, range->readable,
                                             LDE_CPUID, 1, sites + count, available - count, avxemu_cpuid_trap);
                     if (n < 0) { ok = -1; break; }
                     count += (size_t)n;
@@ -137,6 +165,10 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
                 if (ok == -1) { avxemu_lc_rec_fail(); continue; }
             }
         }
+        size_t kept=0;
+        for(size_t i=0;i<count;i++) if(!avxemu_image_data_overlap(image,(uint32_t)ri,sites[i],2))
+            sites[kept++]=sites[i];
+        count=kept;
         /* Reserve ownership before publishing each UD2. A full table declines
          * the whole range; it can never leave an unowned trap behind. */
         if (!count) continue;
@@ -160,11 +192,12 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
         avxemu_patch_write_end(saved, nsaved);
         available = sizeof g_cpuid_addrs / sizeof g_cpuid_addrs[0] - g_cpuid_count;
     }
-    free(sites);
+    avxemu_scan_free(scan);free(sites);
     return total;
 }
 
 void avxemu_patch_cpuid(void) {
-    if (g_l1ecx_set | g_l1ecx_clr | g_l7ebx_set | g_l7ebx_clr)
-        (void)avxemu_cpuid_patch_image(avxemu_image_main(), AVXEMU_SCAN_RECURSIVE);
+    const avxemu_image *image=avxemu_image_main();
+    if (image && (g_l1ecx_set | g_l1ecx_clr | g_l7ebx_set | g_l7ebx_clr))
+        (void)avxemu_cpuid_patch_image(image,image->strategy==AVXEMU_SCAN_STRICT);
 }

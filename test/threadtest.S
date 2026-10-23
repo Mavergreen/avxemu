@@ -9,7 +9,7 @@
 //   void body(uint64_t iters /*rdi*/, uint32_t out[9] /*rsi*/)
 //     out[0..7] = iters (each dword lane of ymm0), out[8] = iters (eax)
 //
-// The faulting op is 4 bytes (VEX.256 vpsubd, //UD without AVX2) followed by a
+// The faulting op is 4 bytes (VEX.256 vpsubd, #UD without AVX2) followed by a
 // 3-byte legal op, so the relocation window is [site, site+7) and the 5-byte jmp
 // covers an INTERIOR instruction boundary at site+4 — the case a thread that
 // was just emulated (rip_next = site+4) can be sitting on when the patch lands.

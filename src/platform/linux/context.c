@@ -2,6 +2,7 @@
 #include "platform/context.h"
 #include "xstate.h"
 #include <string.h>
+#include <signal.h>
 #include <ucontext.h>
 
 static const int registers[16] = {
@@ -9,6 +10,10 @@ static const int registers[16] = {
     REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15
 };
 
+int avxemu_context_signal_blocked(const void *context, int signal) {
+    const ucontext_t *uc=context;
+    return uc ? sigismember(&uc->uc_sigmask,signal) : -1;
+}
 uintptr_t avxemu_context_ip(const void *context) {
     const ucontext_t *uc=context;
     return uc ? (uintptr_t)uc->uc_mcontext.gregs[REG_RIP] : 0;

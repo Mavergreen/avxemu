@@ -194,7 +194,7 @@ int avxemu_image_init(void) {
         functions[i] = (avxemu_function){(uint32_t)r, f->begin-e.ranges[r].begin, f->end-e.ranges[r].begin};
     }
     main_file = file;
-    main_image = (avxemu_image){ranges, e.nranges, functions, e.nfunctions, file.path};
+    main_image = (avxemu_image){ranges, e.nranges, functions, e.nfunctions, file.path, 0, 0, AVXEMU_SCAN_STRICT};
     avxemu_elf_destroy(&e); ready = 1; return 1;
 fail:
     if (file.fd >= 0) close(file.fd);

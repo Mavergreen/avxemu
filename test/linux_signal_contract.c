@@ -11,9 +11,21 @@
 #ifdef __USE_MISC
 #error This test must use the glibc strict-source signal redirect
 #endif
+#ifdef AVXEMU_PRELOAD_TEST
+#include <dlfcn.h>
+static void (*force_install)(void);
+static int *test_ud2;
+static uint64_t (*shlx)(uint64_t, uint64_t);
+static int (*real_action)(int, const struct sigaction *, struct sigaction *);
+#define avxemu_force_install force_install
+#define avxemu_test_ud2 (*test_ud2)
+#define e2e_shlx shlx
+#define avxemu_real_sigaction real_action
+#else
 extern void avxemu_force_install(void);
 extern int avxemu_test_ud2;
 extern uint64_t e2e_shlx(uint64_t, uint64_t);
+#endif
 extern void (*sysv_signal(int, void (*)(int)))(int);
 extern void (*bsd_signal(int, void (*)(int)))(int);
 extern void (*ssignal(int, void (*)(int)))(int);
@@ -54,6 +66,16 @@ static int child(int mode, int die) {
     return die ? 16 : (calls!=(oneshot?1:2) || bad);
 }
 int main(void) {
+#ifdef AVXEMU_PRELOAD_TEST
+    void *scope = dlopen(0, RTLD_NOW);
+    assert(scope);
+    force_install = dlsym(scope, "avxemu_force_install");
+    test_ud2 = dlsym(scope, "avxemu_test_ud2");
+    shlx = dlsym(scope, "e2e_shlx");
+    real_action = dlsym(scope, "avxemu_real_sigaction");
+    assert(force_install && test_ud2 && shlx && real_action);
+    puts("avxemu loaded");
+#endif
     int fail=0;
     for (int mode=0; mode<4; mode++) for (int die=0; die<(mode<2?2:1); die++) {
         pid_t pid=fork(); int status=0;

@@ -59,7 +59,7 @@ static uint8_t *commands(const struct mach_header_64 *mh, struct mach_header_64 
             if (sg->nsects > (lc->cmdsize - sizeof *sg) / sizeof(struct section_64) ||
                 sg->vmsize > UINT64_MAX - sg->vmaddr ||
                 sg->filesize > UINT64_MAX - sg->fileoff) goto fail;
-        } else if (lc->cmd == LC_FUNCTION_STARTS && lc->cmdsize < sizeof(struct linkedit_data_command))
+        } else if ((lc->cmd == LC_FUNCTION_STARTS || lc->cmd == LC_DATA_IN_CODE) && lc->cmdsize < sizeof(struct linkedit_data_command))
             goto fail;
         else if (lc->cmd == LC_UUID && lc->cmdsize < sizeof(struct uuid_command)) goto fail;
         off += lc->cmdsize;
@@ -179,18 +179,55 @@ static int functions(const uint8_t *data, size_t size, uint64_t textseg,
     *count = n; return 1;
 }
 
+int avxemu_darwin_data_spans(const void *records, size_t size, uint64_t file_begin,
+                            size_t text_size, avxemu_data_span *out, size_t *count) {
+    if(!count || (size && !records) || size%sizeof(struct data_in_code_entry)) return 0;
+    size_t n=size/sizeof(struct data_in_code_entry);
+    if(n>UINT32_MAX) return 0;
+    uint64_t previous=file_begin;
+    for(size_t i=0;i<n;i++) {
+        struct data_in_code_entry d; memcpy(&d,(const uint8_t *)records+i*sizeof d,sizeof d);
+        if(!d.length || d.kind<1 || d.kind>5 || d.offset<file_begin ||
+            (uint64_t)d.offset-file_begin>text_size ||
+            d.length>text_size-((uint64_t)d.offset-file_begin) || d.offset<previous ||
+            (d.kind==3 && d.length%2) || (d.kind>=4 && d.length%4)) return 0;
+        previous=(uint64_t)d.offset+d.length;
+    }
+    if(out) for(size_t i=0;i<n;i++) {
+        struct data_in_code_entry d; memcpy(&d,(const uint8_t *)records+i*sizeof d,sizeof d);
+        size_t begin=(size_t)((uint64_t)d.offset-file_begin);
+        out[i]=(avxemu_data_span){0,begin,begin+d.length,d.kind==4?AVXEMU_DATA_JUMP32:AVXEMU_DATA_OPAQUE};
+    }
+    *count=n; return 1;
+}
+static uint8_t *linkedit_bytes(const struct linkedit_data_command *cmd,
+                              const struct segment_command_64 *segment, intptr_t slide) {
+    if(!segment || cmd->dataoff<segment->fileoff ||
+        cmd->dataoff-segment->fileoff>segment->filesize ||
+        cmd->datasize>segment->filesize-(cmd->dataoff-segment->fileoff) ||
+        cmd->dataoff-segment->fileoff>segment->vmsize ||
+        cmd->datasize>segment->vmsize-(cmd->dataoff-segment->fileoff)) return 0;
+    uintptr_t base;
+    size_t offset=(size_t)(cmd->dataoff-segment->fileoff);
+    if(!loaded_address(segment->vmaddr,slide,&base) || offset>UINTPTR_MAX-base ||
+        !readable_span(base+offset,cmd->datasize)) return 0;
+    uint8_t *bytes=malloc(cmd->datasize?cmd->datasize:1);
+    if(bytes && avxemu_memory_read(bytes,base+offset,cmd->datasize)==cmd->datasize) return bytes;
+    free(bytes); return 0;
+}
+
 int avxemu_image_init(void) {
     if (g_ready) return 1;
     intptr_t slide; const char *path;
     const struct mach_header_64 *mh = select_image(0, &slide, &path);
     if (!mh) return 0;
     struct mach_header_64 hdr;
-    uint8_t *data = commands(mh, &hdr), *starts = 0;
+    uint8_t *data = commands(mh, &hdr), *starts = 0, *data_records = 0;
     void *storage = 0;
     if (!data) return 0;
     const struct segment_command_64 *textseg = 0, *linkedit = 0;
     const struct section_64 *text = 0;
-    const struct linkedit_data_command *fs = 0;
+    const struct linkedit_data_command *fs = 0, *dc = 0;
     size_t off = 0;
     for (uint32_t i = 0; i < hdr.ncmds; i++) {
         const struct load_command *lc = (const void *)(data + off);
@@ -213,6 +250,9 @@ int avxemu_image_init(void) {
         } else if (lc->cmd == LC_FUNCTION_STARTS) {
             if (fs) goto fail;
             fs = (const void *)lc;
+        } else if(lc->cmd==LC_DATA_IN_CODE) {
+            if(dc) goto fail;
+            dc=(const void *)lc;
         }
         off += lc->cmdsize;
     }
@@ -228,32 +268,37 @@ int avxemu_image_init(void) {
         (unsigned)textseg->initprot & (AVXEMU_PROT_R | AVXEMU_PROT_W | AVXEMU_PROT_X)
     };
     if (!readable_span((uintptr_t)range.base, range.readable)) goto fail;
-    size_t nfunctions = 0;
+    if(text->offset<textseg->fileoff || text->offset-textseg->fileoff>textseg->filesize ||
+        text->size>textseg->filesize-(text->offset-textseg->fileoff) ||
+        text->offset-textseg->fileoff!=text->addr-textseg->vmaddr) goto fail;
+    size_t nfunctions = 0, ndata = 0;
     if (fs && fs->datasize) {
-        if (!linkedit || fs->dataoff < linkedit->fileoff ||
-            fs->dataoff - linkedit->fileoff > linkedit->filesize ||
-            fs->datasize > linkedit->filesize - (fs->dataoff - linkedit->fileoff) ||
-            fs->dataoff - linkedit->fileoff > linkedit->vmsize ||
-            fs->datasize > linkedit->vmsize - (fs->dataoff - linkedit->fileoff)) goto fail;
-        uintptr_t base;
-        if (!loaded_address(linkedit->vmaddr, slide, &base)) goto fail;
-        size_t offset = (size_t)(fs->dataoff - linkedit->fileoff);
-        if (offset > UINTPTR_MAX - base || !readable_span(base + offset, fs->datasize)) goto fail;
-        starts = malloc(fs->datasize);
-        if (!starts || avxemu_memory_read(starts, base + offset, fs->datasize) != fs->datasize ||
-            !functions(starts, fs->datasize, textseg->vmaddr, textseg->vmsize, &range, 0, &nfunctions)) goto fail;
+        starts=linkedit_bytes(fs,linkedit,slide);
+        if(!starts || !functions(starts,fs->datasize,textseg->vmaddr,textseg->vmsize,&range,0,&nfunctions)) goto fail;
+    }
+    if(dc && dc->datasize) {
+        data_records=linkedit_bytes(dc,linkedit,slide);
+        if(!data_records || !avxemu_darwin_data_spans(data_records,dc->datasize,text->offset,
+            range.size,0,&ndata)) goto fail;
     }
     if (nfunctions > (SIZE_MAX - sizeof range) / sizeof(avxemu_function)) goto fail;
-    storage = malloc(sizeof range + nfunctions * sizeof(avxemu_function));
+    size_t storage_size=sizeof range+nfunctions*sizeof(avxemu_function);
+    if(ndata>(SIZE_MAX-storage_size)/sizeof(avxemu_data_span)) goto fail;
+    storage = malloc(storage_size+ndata*sizeof(avxemu_data_span));
     if (!storage) goto fail;
     memcpy(storage, &range, sizeof range);
     avxemu_function *funcs = (void *)((uint8_t *)storage + sizeof range);
     if (starts && !functions(starts, fs->datasize, textseg->vmaddr, textseg->vmsize, &range, funcs, &nfunctions)) goto fail;
-    g_image = (avxemu_image){storage, 1, funcs, nfunctions, path};
+    avxemu_data_span *spans=(void *)((uint8_t *)storage+storage_size);
+    if(data_records && !avxemu_darwin_data_spans(data_records,dc->datasize,text->offset,
+        range.size,spans,&ndata)) goto fail;
+    avxemu_image candidate={storage,1,funcs,nfunctions,path,spans,ndata,AVXEMU_SCAN_LEGACY};
+    if(!avxemu_image_data_valid(&candidate)) goto fail;
+    g_image=candidate;
     g_ready = 1;
-    free(starts); free(data); return 1;
+    free(data_records); free(starts); free(data); return 1;
 fail:
-    free(storage); free(starts); free(data); return 0;
+    free(storage); free(data_records); free(starts); free(data); return 0;
 }
 
 const avxemu_image *avxemu_image_main(void) {

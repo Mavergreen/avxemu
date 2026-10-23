@@ -246,7 +246,8 @@ static void alu0f_rr(uint8_t **p, int w, uint8_t opc, int reg, int rm){
 static void emit_push(uint8_t **p, int r){ if(r>=8) eb(p,0x41); eb(p,(uint8_t)(0x50|(r&7))); }
 static void emit_pop (uint8_t **p, int r){ if(r>=8) eb(p,0x41); eb(p,(uint8_t)(0x58|(r&7))); }
 static void emit_mov_imm32(uint8_t **p, int r, uint32_t imm){ /* mov r32,imm32 (zero-extends to r64) */
-    if (r>=8) eb(p,0x41); eb(p,(uint8_t)(0xB8|(r&7))); e32(p,imm);
+    if (r>=8) eb(p,0x41);
+    eb(p,(uint8_t)(0xB8|(r&7))); e32(p,imm);
 }
 static void emit_mov_rr (uint8_t **p,int w,int d,int s){ alu_rr(p,w,0x89,s,d); } /* d = s   (MOV r/m,r) */
 static void emit_and_rr (uint8_t **p,int w,int d,int s){ alu_rr(p,w,0x21,s,d); } /* d &= s  (AND r/m,r) */
@@ -440,7 +441,7 @@ static int patch_site_jmp(uint8_t *site, int64_t srel, volatile uint8_t *patched
     __asm__ volatile("xchgq %0, (%1)" : "+r"(v) : "r"(w) : "memory");   /* the one store */
     if (!avxemu_memory_patch_end(&saved)) {
         static const char msg[] = "avxemu: fatal: cannot restore relocation page permissions\n";
-        (void)write(2, msg, sizeof msg - 1); _exit(127);
+        (void)!write(2, msg, sizeof msg - 1); _exit(127);
     }
     return 1;
 }

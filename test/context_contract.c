@@ -17,6 +17,11 @@ static volatile sig_atomic_t adapter_fail;
 static void inspect(int sig, siginfo_t *info, void *context) {
     avxemu_regfile integer, vector, after;
     (void)sig; (void)info;
+    sigset_t active;
+    if (sigprocmask(SIG_SETMASK,0,&active) ||
+        avxemu_context_signal_blocked(context,SIGBUS)!=1 ||
+        avxemu_context_signal_blocked(context,SIGSEGV)!=0 ||
+        !sigismember(&active,SIGBUS) || !sigismember(&active,SIGSEGV)) adapter_fail=1;
     memset(&integer,0x5a,sizeof integer);
     if (!avxemu_context_read(context,&integer,0) ||
         !avxemu_context_read(context,&vector,1)) { adapter_fail=1; return; }
@@ -40,9 +45,20 @@ static void initialize_vector(int sig, siginfo_t *info, void *context) {
     ucontext_t *uc=context;
     (void)info;
     if (sig!=SIGILL || !avxemu_xstate_live(uc->uc_mcontext.fpregs,&state) ||
-        (state.active&4) || !avxemu_context_read(context,&rf,1)) {
+        !avxemu_context_read(context,&rf,1)) {
         adapter_fail=1;
     } else {
+        /* XSAVE may conservatively mark zeroed YMM state active. Establish a
+         * valid inactive component explicitly, after checking VZEROALL's
+         * result; then exercise the real signal-return activation path. */
+        for (int i=0; i<16; i++) for (int j=16; j<32; j++)
+            if (rf.ymm[i][j]) adapter_fail=1;
+        if (adapter_fail) goto resume;
+        state.active &= ~UINT64_C(4);
+        memcpy(state.header,&state.active,sizeof state.active);
+        /* Inactive bytes are ignored, even if the backing storage is stale. */
+        memset(state.ymmh,0xa5,16*16);
+        if (!avxemu_context_read(context,&rf,1)) adapter_fail=1;
         for (int i=0; i<16; i++) for (int j=16; j<32; j++)
             if (rf.ymm[i][j]) adapter_fail=1;
         for (int j=0; j<32; j++) rf.ymm[0][j]=(uint8_t)(j+1);
@@ -50,6 +66,7 @@ static void initialize_vector(int sig, siginfo_t *info, void *context) {
         if (!avxemu_context_write(context,&rf,1)) adapter_fail=1;
         else return;
     }
+resume:
     avxemu_context_set_ip(context,avxemu_context_ip(context)+2);
 }
 static int initial_sigreturn(void) {
@@ -76,10 +93,16 @@ int main(void) {
     avxemu_regfile untouched, before;
     memset(&untouched,0x5a,sizeof untouched); before=untouched;
     if (avxemu_context_read(0,&untouched,1) || memcmp(&before,&untouched,sizeof before) ||
-        avxemu_context_write(0,&untouched,1)) fail++;
+        avxemu_context_write(0,&untouched,1) ||
+        avxemu_context_signal_blocked(0,SIGBUS)!=-1) fail++;
     struct sigaction action; memset(&action,0,sizeof action);
     action.sa_sigaction=inspect; action.sa_flags=SA_SIGINFO; sigemptyset(&action.sa_mask);
-    if (sigaction(SIGUSR2,&action,0) || raise(SIGUSR2) || adapter_fail) fail++;
+    sigaddset(&action.sa_mask,SIGSEGV);
+    sigset_t caller_mask, old_mask;
+    sigemptyset(&caller_mask); sigaddset(&caller_mask,SIGBUS);
+    if (sigprocmask(SIG_BLOCK,&caller_mask,&old_mask) ||
+        sigaction(SIGUSR2,&action,0) || raise(SIGUSR2) || adapter_fail) fail++;
+    if (sigprocmask(SIG_SETMASK,&old_mask,0)) fail++;
     for (int i=0;i<16;i++) {
         context_input.gpr[i] = 0x123456789abc0000ull + i;
         for (int j=0;j<32;j++) context_input.ymm[i][j] = (uint8_t)(i*37+j*3+1);
