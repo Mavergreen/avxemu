@@ -5,26 +5,26 @@
 #ifndef AVXEMU_LCACHE_H
 #define AVXEMU_LCACHE_H
 #include <stdint.h>
+#include "image.h"
+#include "platform/host.h"
 
 enum { LC_OFF = 0, LC_RECORD = 1, LC_REPLAY = 2 };
 extern int avxemu_lc_mode;
 
-typedef struct { uint32_t off; uint8_t old, neu; uint16_t pad; } lc_byte;   /* one prefix edit */
-typedef struct { uint32_t site, n, resume; } lc_run;                         /* one trampoline */
+typedef struct { uint32_t range, reserved; uint64_t off; } lc_site;
+typedef struct { lc_site site; uint8_t old, neu; uint8_t reserved[6]; } lc_byte;
+typedef struct { lc_site site, resume; uint32_t n, reserved; } lc_run;
 
-/* The file: lc_hdr, then n_cpuid uint32 offsets, n_bytes lc_byte, n_runs lc_run.
- * body_sum is FNV-1a 64 over the body, truncated. Here (not in lcache.c) so the
- * test can build a well-formed file that is wrong in content. */
+/* Fixed-width, explicitly zero-reserved records. The header is followed by
+ * n_cpuid lc_site, n_bytes lc_byte, and n_runs lc_run records. body_sum is
+ * FNV-1a 64 over that body, truncated to 32 bits. */
 #define LC_MAGIC   "AVXEMUC"
-#define LC_VERSION 1u
+#define LC_VERSION 2u
 typedef struct {
-    uint8_t  self_uuid[16];     /* avxemu's own build */
-    uint8_t  exe_uuid[16];      /* the program's, or zeros if it has none */
-    uint64_t exe_dev, exe_ino, exe_size, exe_mtime_s, exe_mtime_ns;
-    uint64_t text_vmaddr, text_size;
-    uint32_t cpu_l1ecx, cpu_l7ebx, cpu_x1ecx;
-    uint32_t pad;
-    uint64_t env_hash;          /* AVXEMU_* settings that can change the answer */
+    avxemu_file_identity self, exe;
+    uint64_t layout_hash;       /* ordered link-time ranges; never load addresses */
+    uint32_t cpu_l1ecx, cpu_l7ebx, cpu_x1ecx, reserved;
+    uint64_t env_hash;          /* sorted AVXEMU_* settings that affect analysis */
 } lc_key;
 typedef struct {
     char     magic[8];
@@ -37,12 +37,15 @@ void avxemu_lc_begin(void);        /* constructor, before the passes: sets the m
 void avxemu_lc_end(void);          /* constructor, after them: writes a recording */
 void avxemu_lc_invalid(void);      /* a replay disagreed with the program: drop the file */
 
-void avxemu_lc_rec_cpuid(uint32_t off);
-void avxemu_lc_rec_byte(uint32_t off, uint8_t old, uint8_t neu);
-void avxemu_lc_rec_run(uint32_t site, uint32_t n, uint32_t resume);
+void avxemu_lc_rec_cpuid(lc_site site);
+void avxemu_lc_rec_byte(lc_site site, uint8_t old, uint8_t neu);
+void avxemu_lc_rec_run(lc_site site, uint32_t n, lc_site resume);
 void avxemu_lc_rec_fail(void);     /* the recording would be incomplete: write nothing */
 
-uint32_t avxemu_lc_cpuid(const uint32_t **offs);   /* offsets are relative to __text */
+uint32_t avxemu_lc_cpuid(const lc_site **sites);
 uint32_t avxemu_lc_bytes(const lc_byte **ent);
 uint32_t avxemu_lc_runs(const lc_run **runs);
+/* need == 0 permits a range-end resume address; other sites are half-open.
+ * Failure returns NULL without reading image bytes. */
+uint8_t *avxemu_lc_resolve(const avxemu_image *image, lc_site site, size_t need);
 #endif

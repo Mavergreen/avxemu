@@ -98,23 +98,24 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
     size_t available = sizeof g_cpuid_addrs / sizeof g_cpuid_addrs[0] - g_cpuid_count;
     size_t *sites = malloc((available ? available : 1) * sizeof *sites);
     if (!sites) { avxemu_lc_rec_fail(); return 0; }
+    if (avxemu_lc_mode == LC_REPLAY) {
+        const lc_site *cached; uint32_t n = avxemu_lc_cpuid(&cached);
+        int valid = n <= available;
+        for (uint32_t i = 0; i < n && valid; i++) {
+            uint8_t *p = avxemu_lc_resolve(image, cached[i], 2);
+            valid = p && p[0] == 0x0f && p[1] == 0xa2;
+        }
+        if (!valid) avxemu_lc_invalid();
+    }
     long total = 0;
     for (size_t ri = 0; ri < image->nranges; ri++) {
         const avxemu_code_range *range = &image->ranges[ri];
         size_t count = 0;
         int ok = 1;
-        if (avxemu_lc_mode == LC_REPLAY && image->nranges == 1) {
-            const uint32_t *offsets;
-            uint32_t n = avxemu_lc_cpuid(&offsets);
-            ok = n <= available;
-            for (uint32_t i = 0; i < n && ok; i++) {
-                size_t off = offsets[i];
-                ok = off < range->size && range->size - off >= 2 &&
-                     (!i || offsets[i - 1] < off) &&
-                     range->base[off] == 0x0f && range->base[off + 1] == 0xa2;
-                if (ok) sites[count++] = off;
-            }
-            if (!ok) { avxemu_lc_invalid(); count = 0; }
+        if (avxemu_lc_mode == LC_REPLAY) {
+            const lc_site *cached; uint32_t n = avxemu_lc_cpuid(&cached);
+            for (uint32_t i = 0; i < n; i++)
+                if (cached[i].range == ri) sites[count++] = (size_t)cached[i].off;
         } else ok = 0;
         if (!ok) {
             if (!recursive) {
@@ -155,7 +156,8 @@ long avxemu_cpuid_patch_image(const avxemu_image *image, int recursive) {
             g_cpuid_count++;
             __asm__ volatile("" ::: "memory"); /* ownership precedes the trap */
             p[1] = 0x0b;
-            if (image->nranges == 1) avxemu_lc_rec_cpuid((uint32_t)sites[i]);
+            lc_site site = {(uint32_t)ri, 0, sites[i]};
+            avxemu_lc_rec_cpuid(site);
             total++;
         }
         avxemu_patch_write_end(saved, nsaved);
