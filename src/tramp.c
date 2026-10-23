@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /*
  * tramp.c — trampoline dispatch, thunk pool, and thunk builder.
  *
@@ -11,7 +12,9 @@
 #include "vexops.h"
 #include "lde.h"
 #include "lcache.h"
-#include "platform/darwin/image.h"
+#include "image.h"
+#include "platform/memory.h"
+#include "avxemu_cpuid.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,12 +24,6 @@
 #include <pthread.h>
 #include <signal.h>
 #include <fcntl.h>
-#include <mach/mach.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <cpuid.h>
-
-extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
 
 /* run_record: laid out immediately after the thunk code (see tramp.s). */
 typedef struct { uint64_t addr; decoded dec; } tramp_insn;   /* addr feeds rf->rip per instruction */
@@ -183,9 +180,14 @@ void avxemu_tramp_dispatch_bmi(const run_record *r, avxemu_regfile *rf) {
 static uint8_t *g_pool; static size_t g_used, g_cap;
 
 int avxemu_pool_init(void *hint, size_t cap) {
-    void *p = mmap(hint, cap, PROT_READ | PROT_WRITE | PROT_EXEC,
-                   MAP_PRIVATE | MAP_ANON, -1, 0);
-    if (p == MAP_FAILED) return 0;
+    uintptr_t near = (uintptr_t)hint;
+    if (!near) {
+        size_t page = avxemu_page_size();
+        if (!page) return 0;
+        near = ((uintptr_t)avxemu_pool_init + 0x100000) / page * page;
+    }
+    void *p = avxemu_memory_alloc_near(near, cap);
+    if (!p) return 0;
     g_pool = (uint8_t *)p; g_cap = cap; g_used = 0;
     return 1;
 }
@@ -197,8 +199,9 @@ size_t avxemu_pool_used(void){ return g_used; }
  * runtime relocator (reloc.c) both allocate through it, so the two can never hand
  * out overlapping bytes of the live pool. Returns NULL if uninitialized/exhausted. */
 void *avxemu_pool_alloc(size_t n) {
+    if (n > SIZE_MAX - 15) return 0;
     n = (n + 15) & ~(size_t)15;
-    if (!g_pool || g_used + n > g_cap) return 0;
+    if (!g_pool || n > g_cap - g_used) return 0;
     uint8_t *p = g_pool + g_used; g_used += n;
     return p;
 }
@@ -668,7 +671,12 @@ static void gb_and_rsp_imm32(uint8_t **p,uint32_t imm){ nb(p,0x48); nb(p,0x81); 
 /* or qword [rsp], reg  (REX.W[.R] 09 /r, modrm 00/reg/100 + SIB rsp) */
 static void gb_or_rsp_reg(uint8_t **p,int reg){ nb(p,(uint8_t)(0x48|((reg>=8)?4:0))); nb(p,0x09); nb(p,(uint8_t)(0x04|((reg&7)<<3))); nb(p,0x24); }
 /* jmp rel32 to absolute `target` from the current (final) emit point */
-static void gb_jmp_abs(uint8_t **p,uint64_t target){ nb(p,0xE9); int32_t rel=(int32_t)((int64_t)target-(int64_t)(*p+4)); nb32(p,rel); }
+static int gb_jmp_abs(uint8_t **p, uint64_t target) {
+    int64_t delta = (int64_t)target - (int64_t)(uintptr_t)(*p + 5);
+    if (delta < INT32_MIN || delta > INT32_MAX) return 0;
+    nb(p, 0xe9); nb32(p, (uint32_t)(int32_t)delta);
+    return 1;
+}
 /* lea rsp, [rsp+disp32]  (48 8D A4 24 disp32) — adjust rsp WITHOUT touching flags */
 static void gb_lea_rsp(uint8_t **p,int32_t disp){ nb(p,0x48); nb(p,0x8D); nb(p,0xA4); nb(p,0x24); nb32(p,(uint32_t)disp); }
 static void gb_mov   (uint8_t **p,int w,int d,int s){ gb_alu_rr(p,w,0x89,s,d); } /* d = s (mov r/m,r) */
@@ -873,7 +881,7 @@ static int emit_minspill_lzcnt(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop (p, T2);
     gb_pop (p, T1);
     gb_lea_rsp(p, 128);           /* restore rsp above the red zone (flags untouched) */
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -927,7 +935,7 @@ static int emit_minspill_shlx(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop(p, RCX);               /* restore program rcx */
     gb_popfq(p);                  /* restore flags unchanged (shlx defines none) */
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1002,7 +1010,7 @@ static int emit_minspill_tzcnt(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop (p, T2);
     gb_pop (p, T1);
     gb_lea_rsp(p, 128);            /* restore rsp above the red zone (flags untouched) */
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1052,7 +1060,7 @@ static int emit_minspill_shrx(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop(p, RCX);               /* restore program rcx */
     gb_popfq(p);                  /* restore flags unchanged (shrx defines none) */
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1102,7 +1110,7 @@ static int emit_minspill_sarx(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop(p, RCX);
     gb_popfq(p);
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1154,7 +1162,7 @@ static int emit_minspill_rorx(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop(p, T);                 /* restore scratch T */
     gb_popfq(p);                  /* restore flags unchanged (rorx defines none) */
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1273,7 +1281,7 @@ static int emit_minspill_bzhi(uint8_t **p, const decoded *d, uint64_t resume){
     gb_pop(p, RCX);                   /* restore program rcx */
     gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
     gb_lea_rsp(p, 128);               /* restore rsp above the red zone (flags untouched) */
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1374,7 +1382,7 @@ static int emit_minspill_blsr(uint8_t **p, const decoded *d, uint64_t resume){
     gb_popfq(p);                            /* live flags = patched original */
     gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
     gb_lea_rsp(p, 128);                     /* restore rsp above red zone; no flag effect */
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1422,7 +1430,7 @@ static int emit_minspill_blsi(uint8_t **p, const decoded *d, uint64_t resume){
     gb_popfq(p);
     gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1470,7 +1478,7 @@ static int emit_minspill_blsmsk(uint8_t **p, const decoded *d, uint64_t resume){
     gb_popfq(p);
     gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1553,7 +1561,7 @@ static int emit_minspill_andn(uint8_t **p, const decoded *d, uint64_t resume){
     gb_popfq(p);                         /* live flags = patched original */
     gb_pop(p, T3); gb_pop(p, T2); gb_pop(p, T1);
     gb_lea_rsp(p, 128);                  /* restore rsp above red zone; no flag effect */
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1632,7 +1640,7 @@ static int emit_minspill_mulx(uint8_t **p, const decoded *d, uint64_t resume){
     if (save_rax) gb_pop(p, RAX);
     gb_popfq(p);                      /* restore original flags unchanged (MULX defines none) */
     gb_lea_rsp(p, 128);
-    gb_jmp_abs(p, resume);
+    if (!gb_jmp_abs(p, resume)) return 0;
     return 1;
 }
 
@@ -1981,14 +1989,8 @@ static int collect_branch_targets(uint8_t *text, size_t fstart, size_t fend,
     return 1;
 }
 
-/* ---- function-bounds cache for the runtime patch-safety check (Part 3). Filled
- * once by install_trampolines from the SAME LC_FUNCTION_STARTS data the eager scan
- * walks, so avxemu_patch_safe is cheap per call. g_func_starts holds ABSOLUTE
- * addresses (vmaddr+slide) of every function start inside __text, sorted ascending;
- * the function containing an address A is [start_i, start_{i+1}) where start_i is
- * the greatest start <= A (the last function ends at g_text_hi). ----------------- */
-static uint64_t *g_func_starts; static int g_func_count;
-static uint8_t  *g_text_base; static uint64_t g_text_lo, g_text_hi;
+/* Immutable metadata used by the runtime patch-safety check. */
+static const avxemu_image *g_patch_image;
 
 /* Branch-target scratch for the patch-safety scan. avxemu_patch_safe now runs
  * INSIDE the SIGILL handler (on_sigill -> avxemu_relocate_block -> avxemu_patch_safe),
@@ -1996,9 +1998,8 @@ static uint8_t  *g_text_base; static uint64_t g_text_lo, g_text_hi;
  * could have interrupted the allocator mid-update, risking deadlock. A fixed static
  * map sized to a generous max function span replaces the heap allocation. If a
  * containing function's span exceeds the cap we DECLINE (return 0, the safe floor).
- * SINGLE-THREADED: this map is touched only during a patch attempt; the startup
- * spin this targets is single-threaded main-thread, so concurrent relocation
- * attempts from multiple threads are out of scope for Milestone A — no locking. */
+ * Runtime callers hold handler.c's shared relocation lock while using this
+ * scratch map and the pool cursor. */
 #define PATCHSAFE_MAP_MAX (256u * 1024)
 static uint8_t g_patchsafe_map[PATCHSAFE_MAP_MAX];
 
@@ -2008,34 +2009,24 @@ static uint8_t g_patchsafe_map[PATCHSAFE_MAP_MAX];
  * the function won't decode cleanly, or it contains an unresolved indirect jmp
  * (whose target could land anywhere, including inside the jmp footprint). */
 int avxemu_patch_safe(uint8_t *site, int jmplen) {
-    if (!g_func_starts || g_func_count <= 0 || !g_text_base) return 0;  /* layout unknown */
-    if (jmplen <= 1) return 1;
-    uint64_t a = (uint64_t)(uintptr_t)site;
-    if (a < g_text_lo || a >= g_text_hi) return 0;                      /* outside scanned text */
-
-    /* greatest function start <= a */
-    int lo = 0, hi = g_func_count - 1, idx = -1;
-    while (lo <= hi) { int mid = (lo + hi) >> 1;
-        if (g_func_starts[mid] <= a) { idx = mid; lo = mid + 1; } else hi = mid - 1; }
-    if (idx < 0) return 0;
-    uint64_t fstart_abs = g_func_starts[idx];
-    uint64_t fend_abs   = (idx + 1 < g_func_count) ? g_func_starts[idx + 1] : g_text_hi;
-    if (fend_abs > g_text_hi) fend_abs = g_text_hi;
-    if (a + (uint64_t)jmplen > fend_abs) return 0;     /* jmp would spill past function end */
-
-    size_t fstart = (size_t)(fstart_abs - g_text_lo);
-    size_t fend   = (size_t)(fend_abs   - g_text_lo);
+    if (jmplen <= 0) return 0;
+    const avxemu_function *f = avxemu_image_function(g_patch_image, (uintptr_t)site);
+    if (!f) return 0;
+    const avxemu_code_range *range = &g_patch_image->ranges[f->range];
+    size_t offset = (size_t)((uintptr_t)site - (uintptr_t)range->base);
+    if ((size_t)jmplen > f->end - offset) return 0;
+    size_t fstart = f->begin, fend = f->end;
     size_t n = fend - fstart;
     if (n > PATCHSAFE_MAP_MAX) return 0;               /* span exceeds scratch cap -> decline (safe floor) */
     uint8_t *tgt = g_patchsafe_map;                    /* static scratch: no malloc in the handler */
     memset(tgt, 0, n);                                 /* collect_branch_targets needs a pre-zeroed map */
     int has_indirect = 0;
-    int clean = collect_branch_targets(g_text_base, fstart, fend, tgt, &has_indirect);
+    int clean = collect_branch_targets(range->base, fstart, fend, tgt, &has_indirect);
     int safe = 1;
     if (!clean || has_indirect) {
         safe = 0;                                      /* can't fully account for targets */
     } else {
-        size_t soff = (size_t)(a - g_text_lo) - fstart;  /* site offset within function */
+        size_t soff = offset - fstart;  /* site offset within function */
         for (int k = 1; k < jmplen; k++) {               /* open interval (site, site+jmplen) */
             size_t off = soff + (size_t)k;
             if (off < n && tgt[off]) { safe = 0; break; }
@@ -2044,17 +2035,27 @@ int avxemu_patch_safe(uint8_t *site, int jmplen) {
     return safe;
 }
 
+/* Explicit metadata hook for synthetic multi-range contract fixtures. */
+void avxemu_patch_safe_test_image(const avxemu_image *image) { g_patch_image = image; }
+
+/* Bounds used before relocation decodes or copies a legal tail. */
+const uint8_t *avxemu_patch_limit(const uint8_t *site) {
+    const avxemu_function *f = avxemu_image_function(g_patch_image, (uintptr_t)site);
+    return f ? g_patch_image->ranges[f->range].base + f->end : 0;
+}
+
 /* Test hook (reloctest): register a single synthetic function [base, base+size)
  * as the cached layout so avxemu_patch_safe can run against a unit-test buffer not
  * in the main image's __text. Production NEVER calls this — install_trampolines
- * populates the cache from LC_FUNCTION_STARTS. */
+ * uses the immutable main image metadata. */
 void avxemu_patch_safe_test_region(uint8_t *base, size_t size) {
-    static uint64_t one_start;
-    one_start = (uint64_t)(uintptr_t)base;
-    g_func_starts = &one_start; g_func_count = 1;
-    g_text_base = base;
-    g_text_lo = (uint64_t)(uintptr_t)base;
-    g_text_hi = g_text_lo + size;
+    static avxemu_code_range range;
+    static avxemu_function function;
+    static avxemu_image image;
+    range = (avxemu_code_range){base, (uintptr_t)base, size, size, AVXEMU_PROT_R | AVXEMU_PROT_X};
+    function = (avxemu_function){0, 0, size};
+    image = (avxemu_image){&range, 1, &function, 1, 0};
+    g_patch_image = &image;
 }
 
 /*
@@ -2065,7 +2066,7 @@ void avxemu_patch_safe_test_region(uint8_t *base, size_t size) {
  * a run of physically-consecutive ones always falls through to real code — the
  * resume point is safe in both modes.
  */
-static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t readable) {
+static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t readable, int recursive) {
     size_t n = fend - fstart;
     uint8_t *tgt = calloc(n, 1);
     if (!tgt) return 0;
@@ -2073,7 +2074,7 @@ static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t read
 
     /* pass 1: clean linear decode? collect direct-branch targets + indirect flag */
     int has_indirect = 0;
-    int clean = collect_branch_targets(text, fstart, fend, tgt, &has_indirect);
+    int clean = !recursive && collect_branch_targets(text, fstart, fend, tgt, &has_indirect);
 
     if (clean) {
         /* pass 2: walk linearly; trampoline each maximal faulting run */
@@ -2094,7 +2095,7 @@ static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t read
          * inside reachable code only (jump-table data is never visited or patched). */
         uint8_t *code = calloc(n, 1);
         memset(tgt, 0, n);                               /* linear targets past the desync are bogus */
-        if (code && lde_rd_map(text, fstart, fend, readable, code, tgt, &has_indirect)) {
+        if (code && lde_rd_map_traps(text, fstart, fend, readable, code, tgt, &has_indirect, avxemu_cpuid_trap)) {
             size_t off = 0;
             while (off < n) {
                 if (!code[off]) { off++; continue; }
@@ -2112,12 +2113,6 @@ static long scan_function(uint8_t *text, size_t fstart, size_t fend, size_t read
     }
     free(tgt);
     return patched;
-}
-
-static uint64_t uleb_t(const uint8_t **p, const uint8_t *e) {
-    uint64_t r = 0; int s = 0; uint8_t x;
-    do { if (*p >= e) return r; x = *(*p)++; r |= (uint64_t)(x & 0x7f) << s; s += 7; } while (x & 0x80);
-    return r;
 }
 
 /* lcache replay: one recorded run's instructions, decoded afresh. It must still be
@@ -2159,6 +2154,8 @@ static int replay_runs(uint8_t *text, size_t text_size, long *total) {
 
 /* Install trampolines over the main executable. Returns jmps written. */
 long avxemu_install_trampolines(void) {
+    const avxemu_image *image = avxemu_image_main();
+    g_patch_image = image;
     detect_features();
     if (!g_lack_avx2 && !g_lack_fma && !g_lack_bmi && !g_lack_f16c) return 0;  /* nothing faults here */
 
@@ -2175,96 +2172,38 @@ long avxemu_install_trampolines(void) {
     /* per-thread side-stack key, created here (single-threaded) before any thunk runs */
     if (!g_side_key_ok && pthread_key_create(&g_side_key, 0) == 0) g_side_key_ok = 1;
 
-    intptr_t slide;
-    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
-    if (!mh) return 0;
-
-    uint64_t tseg_vm = 0, tseg_sz = 0, text_addr = 0, text_size = 0, le_vm = 0, le_off = 0;
-    uint32_t fs_off = 0, fs_size = 0;
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-            if (!strcmp(sg->segname, "__TEXT")) {
-                tseg_vm = sg->vmaddr; tseg_sz = sg->vmsize;
-                const struct section_64 *sc = (const struct section_64 *)(sg + 1);
-                for (uint32_t j = 0; j < sg->nsects; j++)
-                    if (!strcmp(sc[j].sectname, "__text")) { text_addr = sc[j].addr; text_size = sc[j].size; }
-            } else if (!strcmp(sg->segname, "__LINKEDIT")) { le_vm = sg->vmaddr; le_off = sg->fileoff; }
-        } else if (lc->cmd == LC_FUNCTION_STARTS) {
-            const struct linkedit_data_command *ld = (const struct linkedit_data_command *)lc;
-            fs_off = ld->dataoff; fs_size = ld->datasize;
+    if (!image || !image->nranges) return 0;
+    const avxemu_code_range *first = &image->ranges[0];
+    uintptr_t hint = (uintptr_t)first->base + first->size;
+    size_t page = avxemu_page_size();
+    if (!page || hint > UINTPTR_MAX - 0x100000) return 0;
+    hint = (hint + 0x100000) / page * page;
+    if (!g_pool && !avxemu_pool_init((void *)hint, 96u << 20)) {
+        avxemu_lc_rec_fail(); return 0;
+    }
+    long total = 0;
+    for (size_t ri = 0; ri < image->nranges; ri++) {
+        const avxemu_code_range *range = &image->ranges[ri];
+        size_t nsaved;
+        avxemu_mapping *saved = avxemu_patch_write_begin((uintptr_t)range->base, range->size, &nsaved);
+        if (!saved) {
+            avxemu_lc_rec_fail(); continue;
         }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
-    if (!text_addr || !fs_off) return 0;
-
-    uint8_t *text = (uint8_t *)(text_addr + slide);
-    /* switch-table resolution may read entries in __const after __text */
-    size_t readable = (size_t)((tseg_vm + tseg_sz) - text_addr);
-
-    /* thunk pool, placed near __text so jmp rel32 reaches it */
-    size_t pool_sz = 96u << 20;
-    void *hint = (void *)(((uintptr_t)(text + text_size) + 0x100000) & ~(uintptr_t)0xfff);
-    if (!avxemu_pool_init(hint, pool_sz)) { avxemu_lc_rec_fail(); return 0; }
-
-    /* make __text writable for the patch pass (COPY: __TEXT maxprot lacks write),
-     * keeping it executable: see avxemu_patch_lzcnt */
-    mach_port_t task = mach_task_self();
-    uintptr_t lo = (uintptr_t)text & ~(uintptr_t)0xfff;
-    uintptr_t hi = ((uintptr_t)text + text_size + 0xfff) & ~(uintptr_t)0xfff;
-    if (vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY) != KERN_SUCCESS) {
-        avxemu_lc_rec_fail();
-        return 0;
-    }
-
-    const uint8_t *fp = (const uint8_t *)(le_vm + slide + (fs_off - le_off));
-    const uint8_t *fe = fp + fs_size;
-
-    /* Cache function bounds for the runtime patch-safety check (Part 3) from the
-     * SAME LC_FUNCTION_STARTS data the scan loop below walks. Two cheap passes over
-     * the (copied) cursor — count in-__text starts, then record absolute addresses.
-     * fp is left untouched for the scan loop. */
-    g_text_base = text;
-    g_text_lo = (uint64_t)(uintptr_t)text;
-    g_text_hi = g_text_lo + text_size;
-    {
-        const uint8_t *cp = fp; uint64_t ca = tseg_vm; int cnt = 0;
-        while (cp < fe) { uint64_t d = uleb_t(&cp, fe); if (!d) break; ca += d;
-            if (ca >= text_addr && ca < text_addr + text_size) cnt++; }
-        if (cnt > 0) {
-            g_func_starts = (uint64_t *)malloc((size_t)cnt * sizeof(uint64_t));
-            if (g_func_starts) {
-                const uint8_t *cp2 = fp; uint64_t ca2 = tseg_vm; int k = 0;
-                while (cp2 < fe && k < cnt) { uint64_t d = uleb_t(&cp2, fe); if (!d) break; ca2 += d;
-                    if (ca2 >= text_addr && ca2 < text_addr + text_size)
-                        g_func_starts[k++] = ca2 + (uint64_t)slide; }   /* absolute, ascending */
-                g_func_count = k;
+        long replayed = 0;
+        if (avxemu_lc_mode == LC_REPLAY && image->nranges == 1 &&
+            replay_runs(range->base, range->size, &replayed)) {
+            total += replayed;
+        } else {
+            if (avxemu_lc_mode == LC_REPLAY) avxemu_lc_invalid();
+            for (size_t fi = 0; fi < image->nfunctions; fi++) {
+                const avxemu_function *f = &image->functions[fi];
+                if (f->range != ri || f->begin >= f->end || f->end > range->size) continue;
+                total += scan_function(range->base, f->begin, f->end,
+                                        range->readable, AVXEMU_SCAN_RECURSIVE);
             }
         }
+        avxemu_patch_write_end(saved, nsaved);
     }
-
-    uint64_t addr = tseg_vm; uint64_t prev = 0; long total = 0;
-    if (avxemu_lc_mode == LC_REPLAY && replay_runs(text, (size_t)text_size, &total)) {
-        fp = fe; prev = 0;                  /* recorded: skip the analysis loops below */
-    } else if (avxemu_lc_mode == LC_REPLAY) {
-        avxemu_lc_invalid();
-    }
-    while (fp < fe) {
-        uint64_t delta = uleb_t(&fp, fe); if (!delta) break;
-        addr += delta;
-        if (prev && prev >= text_addr && prev < text_addr + text_size) {
-            uint64_t fend = addr; if (fend > text_addr + text_size) fend = text_addr + text_size;
-            total += scan_function(text, prev - text_addr, fend - text_addr, readable);
-        }
-        prev = addr;
-    }
-    if (prev && prev >= text_addr && prev < text_addr + text_size) {
-        total += scan_function(text, prev - text_addr, text_size, readable);
-    }
-
-    vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
 
     if (g_nstats){   /* AVXEMU_NATIVE_STATS run-composition report (stderr) */
         emit("=== AVXEMU_NATIVE_STATS (install-time run composition) ===\n");
