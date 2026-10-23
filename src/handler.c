@@ -12,19 +12,14 @@
 
 #define _XOPEN_SOURCE 700
 #include <signal.h>
-#include <sys/ucontext.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <sys/mman.h>
 #include <fcntl.h>       /* open() in faulthist_dump */
 #include <stdio.h>       /* rename() in faulthist_dump */
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <mach-o/nlist.h>
 
 #include "decode.h"
 #include "regs.h"
@@ -34,11 +29,10 @@
 #include "lcache.h"
 #include "image.h"
 #include "platform/host.h"
-#include "platform/darwin/image.h"
+#include "platform/context.h"
+#include "platform/loader.h"
 #include "platform/memory.h"
 
-static struct sigaction g_old;
-static int g_owned_sigill = 0;          /* our SIGILL handler is installed */
 
 /*
  * Fault-driven relocation trigger (Task C). A 4-byte isolated scalar BMI op that
@@ -115,8 +109,7 @@ static int faultsnap_enabled(void){
     if (g_faultsnap_on < 0){ const char *e = getenv("AVXEMU_FAULTSNAP"); g_faultsnap_on = (e && e[0] && e[0] != '0') ? 1 : 0; }
     return g_faultsnap_on;
 }
-static uint64_t *gpr_ptr(_STRUCT_X86_THREAD_STATE64 *ss, int i);   /* defined below */
-static void faultsnap_dump(uint64_t rip, _STRUCT_X86_THREAD_STATE64 *ss){
+static void faultsnap_dump(uint64_t rip, const avxemu_regfile *rf){
     int fd = open("/tmp/faultsnap.out", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
     /* seq + monotonic time in the header so recurrence ACROSS the run is measurable */
@@ -124,13 +117,12 @@ static void faultsnap_dump(uint64_t rip, _STRUCT_X86_THREAD_STATE64 *ss){
     (void)write(fd, " t ", 3); fh_u64(fd, avxemu_host_ticks());
     (void)write(fd, " rip ", 5); fh_hex(fd, rip); (void)write(fd, "\n", 1);
     for (int i = 0; i < 16; i++){
-        uint64_t v = *gpr_ptr(ss, i);
+        uint64_t v = rf->gpr[i];
         (void)write(fd, "r", 1); fh_u64(fd, (uint64_t)i); (void)write(fd, "=", 1); fh_hex(fd, v);
         /* plausible user pointer? try a guarded read and print printable runs */
         if (v >= 0x100000000ull && v < 0x800000000000ull){
-            uint8_t buf[128]; mach_vm_size_t got = 0;
-            if (mach_vm_read_overwrite(mach_task_self(), (mach_vm_address_t)(v & ~0xFull),
-                                       sizeof buf, (mach_vm_address_t)(uintptr_t)buf, &got) == KERN_SUCCESS && got == sizeof buf){
+            uint8_t buf[128];
+            if (avxemu_memory_read(buf, (uintptr_t)(v & ~0xFull), sizeof buf) == sizeof buf){
                 int run = 0;
                 for (int k = 0; k <= (int)sizeof buf; k++){
                     int printable = k < (int)sizeof buf && buf[k] >= 0x20 && buf[k] < 0x7F;
@@ -215,51 +207,6 @@ static int site_slot(uint64_t rip) {
 }
 
 /*
- * The genuine libc sigaction. dlsym is unusable: dyld applies our own
- * interposition to *every* symbol resolution (RTLD_NEXT and explicit handles
- * alike) and hands back avxemu_sigaction, which would recurse forever. The real
- * sigaction *code* is untouched, though — we find its address by reading
- * libsystem_c.dylib's own symbol table (n_value + slide), immune to interpose.
- */
-typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
-
-static void *real_sym(const char *img, const char *name){
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        const char *nm = _dyld_get_image_name(i);
-        if (!nm || !strstr(nm, img)) continue;
-        const struct mach_header_64 *mh = (const struct mach_header_64 *)_dyld_get_image_header(i);
-        if (!mh || mh->magic != MH_MAGIC_64) continue;
-        intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-        uint64_t le_vm = 0, le_off = 0; uint32_t symoff = 0, nsyms = 0, stroff = 0;
-        const struct load_command *lc = (const struct load_command *)(mh + 1);
-        for (uint32_t c = 0; c < mh->ncmds; c++) {
-            if (lc->cmd == LC_SEGMENT_64) {
-                const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-                if (!strcmp(sg->segname, "__LINKEDIT")) { le_vm = sg->vmaddr; le_off = sg->fileoff; }
-            } else if (lc->cmd == LC_SYMTAB) {
-                const struct symtab_command *st = (const struct symtab_command *)lc;
-                symoff = st->symoff; nsyms = st->nsyms; stroff = st->stroff;
-            }
-            lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-        }
-        if (!symoff || !le_vm) return 0;
-        const struct nlist_64 *syms = (const struct nlist_64 *)(le_vm + slide + (symoff - le_off));
-        const char *strs = (const char *)(le_vm + slide + (stroff - le_off));
-        for (uint32_t s = 0; s < nsyms; s++) {
-            if (syms[s].n_un.n_strx == 0 || syms[s].n_value == 0) continue;
-            if (!strcmp(strs + syms[s].n_un.n_strx, name)) return (void *)(syms[s].n_value + slide);
-        }
-    }
-    return 0;
-}
-
-static sigaction_fn real_sigaction(void){
-    static sigaction_fn p;
-    if (!p) p = (sigaction_fn)real_sym("libsystem_c.dylib", "_sigaction");
-    return p;
-}
-
-/*
  * Test hook: on an AVX2 host the target instructions don't fault, so the
  * fault-injection harness prefixes each one with `ud2`. When this is set, a
  * #UD whose bytes are 0F 0B is treated as "decode the instruction that follows
@@ -275,8 +222,6 @@ extern long avxemu_patch_lzcnt(void);/* patch_mem.c */
 extern long avxemu_install_trampolines(void); /* tramp.c */
 
 /* ---- crash handler state (for the SIMD over-read fixup) ---- */
-static int g_owns_crash = 0;       /* we installed the SIGSEGV/SIGBUS handler */
-static struct sigaction g_old_segv, g_old_bus;
 
 static int g_fixup_overread = 0;        /* map a zero page on a SIMD over-read fault */
 static unsigned long g_overread_pages = 0;
@@ -306,94 +251,193 @@ static int try_fixup_overread(uint64_t fa){
     return 1;
 }
 
+static void on_sigill(int sig, siginfo_t *info, void *uctx);
+static void on_crash(int sig, siginfo_t *info, void *uctx);
+
+/* The kernel supplies application masking and restart behavior even while our
+ * front-line entry remains installed. One-shot reset belongs to chain_action:
+ * an emulated instruction must not consume the application's disposition. */
+static int install_owned(int sig, const struct sigaction *app) {
+    struct sigaction sa;
+    memset(&sa,0,sizeof sa);
+    sa.sa_sigaction = sig==SIGILL ? on_sigill : on_crash;
+    sa.sa_mask = app->sa_mask;
+    sa.sa_flags = SA_SIGINFO | (app->sa_flags & (SA_RESTART|SA_NODEFER|SA_ONSTACK));
+    if (sig!=SIGILL) sa.sa_flags |= SA_ONSTACK;
+    return avxemu_real_sigaction(sig,&sa,0);
+}
+
+/* Writers never modify the active record. Kernel registration and publication
+ * are serialized with all catchable signals blocked on the acquiring thread,
+ * so an asynchronous handler cannot interrupt its own lock holder. Only trusted
+ * baseline-ISA copies and genuine signal operations run inside the section.
+ * Callbacks always run after releasing it.
+ *
+ * Fork can copy a held lock or an unfinished write. The active record remains a
+ * complete committed disposition in either case. PID change elects one child
+ * recovery thread, which repairs kernel registrations from those records before
+ * releasing other child callers. This needs no application atfork ordering. */
+typedef struct { struct sigaction action; int owned; } policy_state;
+/* Both records and their publication/recovery fields occupy one aligned 4 KiB
+ * unit. x86-64 Darwin/Linux pages are multiples of this unit, so fork/COW cannot
+ * capture an index on a different page snapshot from its records. Three slots
+ * cost 12 KiB of zero-initialized storage. Active records are never modified. */
+typedef struct __attribute__((aligned(4096))) {
+    policy_state states[2];
+    volatile unsigned active;
+    volatile int installing;
+} policy_slot;
+_Static_assert(sizeof(policy_slot)==4096, "policy slot must fit one 4 KiB unit");
+_Static_assert(_Alignof(policy_slot)==4096, "policy slot must be page-local");
+static policy_slot g_policy[3];
+static const int g_policy_signals[3]={SIGILL,SIGSEGV,SIGBUS};
+static volatile int g_policy_lock;
+static volatile pid_t g_policy_pid;
+
+static policy_slot *policy_for(int sig) {
+    for(int i=0;i<3;i++) if(g_policy_signals[i]==sig) return &g_policy[i];
+    return 0;
+}
+static policy_state policy_current(const policy_slot *slot) {
+    unsigned active=__sync_fetch_and_add((volatile unsigned *)&slot->active,0);
+    return slot->states[active];
+}
+static void policy_publish(policy_slot *slot, const struct sigaction *action, int owned) {
+    unsigned next=slot->active^1;
+    slot->states[next].action=*action;
+    slot->states[next].owned=owned;
+    __sync_synchronize();
+    __sync_lock_test_and_set(&slot->active,next);
+}
+static void policy_process(void) {
+    pid_t pid=getpid();
+    for(;;) {
+        pid_t seen=__sync_val_compare_and_swap(&g_policy_pid,0,0);
+        if(seen==pid) return;
+        if(!seen) {
+            if(__sync_bool_compare_and_swap(&g_policy_pid,0,pid)) return;
+        } else if(seen==-pid) {
+            __asm__ volatile("pause");
+        } else if(__sync_bool_compare_and_swap(&g_policy_pid,seen,-pid)) {
+            for(int i=0;i<3;i++) {
+                policy_state committed=policy_current(&g_policy[i]);
+                if(committed.owned) install_owned(g_policy_signals[i],&committed.action);
+                else if(g_policy[i].installing)
+                    avxemu_real_sigaction(g_policy_signals[i],&committed.action,0);
+                g_policy[i].installing=0;
+            }
+            __sync_lock_release(&g_policy_lock);
+            __sync_synchronize();
+            __sync_lock_test_and_set(&g_policy_pid,pid);
+            return;
+        }
+    }
+}
+static void policy_enter(sigset_t *saved) {
+    sigset_t all; sigfillset(&all);
+    pthread_sigmask(SIG_BLOCK,&all,saved);
+    policy_process();
+    while(__sync_lock_test_and_set(&g_policy_lock,1))
+        while(g_policy_lock) __asm__ volatile("pause");
+}
+static void policy_leave(const sigset_t *saved) {
+    int error=errno;
+    __sync_lock_release(&g_policy_lock);
+    pthread_sigmask(SIG_SETMASK,saved,0);
+    errno=error;
+}
+static int policy_owned(int sig) {
+    sigset_t saved; policy_enter(&saved);
+    int owned=policy_current(policy_for(sig)).owned;
+    policy_leave(&saved);
+    return owned;
+}
+static int policy_take(int sig) {
+    sigset_t saved; policy_enter(&saved);
+    policy_slot *slot=policy_for(sig);
+    if(policy_current(slot).owned) { policy_leave(&saved); return 0; }
+    struct sigaction app;
+    int result=avxemu_real_sigaction(sig,0,&app);
+    if(!result) {
+        /* Child recovery can roll back an interrupted first installation. */
+        policy_publish(slot,&app,0);
+        slot->installing=1;
+        result=install_owned(sig,&app);
+        if(!result) policy_publish(slot,&app,1);
+        slot->installing=0;
+    }
+    policy_leave(&saved);
+    return result;
+}
+static void policy_release(int sig) {
+    sigset_t saved; policy_enter(&saved);
+    policy_slot *slot=policy_for(sig);
+    policy_state app=policy_current(slot);
+    if(!avxemu_real_sigaction(sig,&app.action,0)) policy_publish(slot,&app.action,0);
+    policy_leave(&saved);
+}
+
+static void chain_action(int sig, siginfo_t *info, void *uctx, policy_slot *slot) {
+    sigset_t saved; policy_enter(&saved);
+    struct sigaction app=policy_current(slot).action;
+    if(app.sa_handler==SIG_DFL) {
+        /* Keep a concurrent registration from replacing the default between
+         * restoring it and delivering this already-claimed fatal signal. */
+        avxemu_real_sigaction(sig,&app,0);
+        sigset_t unblock; sigemptyset(&unblock); sigaddset(&unblock,sig);
+        pthread_sigmask(SIG_UNBLOCK,&unblock,0);
+        raise(sig);
+        policy_leave(&saved);
+        return;
+    }
+    if(app.sa_handler!=SIG_IGN && (app.sa_flags&SA_RESETHAND)) {
+        struct sigaction reset; memset(&reset,0,sizeof reset);
+        reset.sa_handler=SIG_DFL; sigemptyset(&reset.sa_mask);
+        if(install_owned(sig,&reset)) { policy_leave(&saved); return; }
+        policy_publish(slot,&reset,1);
+    }
+    policy_leave(&saved);
+    /* A signal already in flight can retain the preceding kernel mask/restart
+     * settings; the application disposition is claimed atomically above. */
+    if(app.sa_handler==SIG_IGN) return;
+    if(app.sa_flags&SA_SIGINFO) app.sa_sigaction(sig,info,uctx);
+    else app.sa_handler(sig);
+}
+
 /*
  * SIGSEGV/SIGBUS front-line handler. Its sole job is the SIMD over-read fixup
  * above; anything it can't fix it passes straight to the previous handler so a
  * genuine crash still reports exactly as it would have.
  */
 static void on_crash(int sig, siginfo_t *info, void *uctx){
-    ucontext_t *uc = (ucontext_t *)uctx;
-    uint64_t crip = uc ? (uint64_t)uc->uc_mcontext->__ss.__rip : 0;
+    uint64_t crip = avxemu_context_ip(uctx);
     uint64_t fa = info ? (uint64_t)info->si_addr : 0;
 
     /* Data over-read off the end of a mapped region -> map a zero page, retry.
      * Skip code-fetch faults (fa==rip): those are wild jumps, not over-reads. */
     if ((sig==SIGSEGV || sig==SIGBUS) && fa != crip && try_fixup_overread(fa)) return;
 
-    struct sigaction *o = (sig==SIGSEGV)?&g_old_segv:&g_old_bus;
-    if (o->sa_flags & SA_SIGINFO){ if(o->sa_sigaction){ o->sa_sigaction(sig,info,uctx); return; } }
-    else if (o->sa_handler==SIG_IGN) return;
-    else if (o->sa_handler && o->sa_handler!=SIG_DFL){ o->sa_handler(sig); return; }
-    /* no real handler to chain to: restore the default disposition (via the
-     * genuine sigaction, not our interposed one), unblock, and re-raise so the
-     * process dies cleanly instead of re-entering us on the retried fault. */
-    struct sigaction da; memset(&da,0,sizeof da); da.sa_handler = SIG_DFL; sigemptyset(&da.sa_mask);
-    real_sigaction()(sig, &da, 0);
-    sigset_t um; sigemptyset(&um); sigaddset(&um, sig); sigprocmask(SIG_UNBLOCK, &um, 0);
-    raise(sig);
-}
-
-/* macOS lays xmm0..15 and ymmh0..15 out consecutively; treat as arrays. */
-static int read_mcontext_avx(ucontext_t *uc,
-                             _STRUCT_XMM_REG **xmm, _STRUCT_XMM_REG **ymmh,
-                             _STRUCT_X86_THREAD_STATE64 **ss) {
-    /* AVX state is present when the saved mcontext is at least the AVX size. */
-    if (uc->uc_mcsize < sizeof(_STRUCT_MCONTEXT_AVX64)) return 0;
-    _STRUCT_MCONTEXT_AVX64 *mc = (_STRUCT_MCONTEXT_AVX64 *)uc->uc_mcontext;
-    *xmm  = &mc->__fs.__fpu_xmm0;
-    *ymmh = &mc->__fs.__fpu_ymmh0;
-    *ss   = &mc->__ss;
-    return 1;
-}
-
-static uint64_t *gpr_ptr(_STRUCT_X86_THREAD_STATE64 *ss, int i) {
-    switch (i) {
-    case 0: return &ss->__rax; case 1: return &ss->__rcx; case 2: return &ss->__rdx;
-    case 3: return &ss->__rbx; case 4: return &ss->__rsp; case 5: return &ss->__rbp;
-    case 6: return &ss->__rsi; case 7: return &ss->__rdi; case 8: return &ss->__r8;
-    case 9: return &ss->__r9; case 10:return &ss->__r10; case 11:return &ss->__r11;
-    case 12:return &ss->__r12; case 13:return &ss->__r13; case 14:return &ss->__r14;
-    default:return &ss->__r15;
-    }
+    chain_action(sig, info, uctx, policy_for(sig));
 }
 
 static void chain(int sig, siginfo_t *info, void *uctx) {
-    if (g_old.sa_flags & SA_SIGINFO) {
-        if (g_old.sa_sigaction) { g_old.sa_sigaction(sig, info, uctx); return; }
-    } else if (g_old.sa_handler == SIG_IGN) {
-        return;
-    } else if (g_old.sa_handler && g_old.sa_handler != SIG_DFL) {
-        g_old.sa_handler(sig); return;
-    }
-    /* default: restore the genuine default disposition and re-raise so an
-     * instruction we don't emulate surfaces as a real #UD. This MUST go through
-     * the real sigaction, not our interposed signal()/sigaction: for an owned
-     * SIGILL those only record a new chain target and leave on_sigill frontline,
-     * so signal(sig, SIG_DFL); raise(sig); would re-enter this handler forever
-     * (an infinite SIGILL loop — observed as a hang on any unimplemented insn,
-     * e.g. AVX2 gathers). Mirrors the on_crash chain path. */
-    struct sigaction da; memset(&da, 0, sizeof da);
-    da.sa_handler = SIG_DFL; sigemptyset(&da.sa_mask);
-    real_sigaction()(sig, &da, 0);
-    raise(sig);
+    chain_action(sig, info, uctx, policy_for(sig));
 }
 
 static void on_sigill(int sig, siginfo_t *info, void *uctx) {
-    ucontext_t *uc = (ucontext_t *)uctx;
-    _STRUCT_X86_THREAD_STATE64 *ss0 = &uc->uc_mcontext->__ss;
     avxemu_regfile rf;
-    rf.rip = ss0->__rip;
-    rf.gpr[0] = ss0->__rax; rf.gpr[1] = ss0->__rcx;
+    /* User-generated signals belong to the application, regardless of which
+     * instruction happens to be interrupted. */
+    if (info && (info->si_code == SI_USER || info->si_code == SI_QUEUE)) {
+        chain(sig, info, uctx); return;
+    }
+    if (!avxemu_context_read(uctx, &rf, 0)) { chain(sig, info, uctx); return; }
     if (avxemu_cpuid_handle(&rf)) {
-        ss0->__rax = rf.gpr[0]; ss0->__rcx = rf.gpr[1];
-        ss0->__rdx = rf.gpr[2]; ss0->__rbx = rf.gpr[3];
-        ss0->__rip = rf.rip;
+        if (!avxemu_context_write(uctx, &rf, 0)) chain(sig, info, uctx);
         return;
     }
-    _STRUCT_XMM_REG *xmm, *ymmh; _STRUCT_X86_THREAD_STATE64 *ss;
-    if (!read_mcontext_avx(uc, &xmm, &ymmh, &ss)) { chain(sig, info, uctx); return; }
-
-    uint64_t rip = ss->__rip;
+    if (!avxemu_context_read(uctx, &rf, 1)) { chain(sig, info, uctx); return; }
+    uint64_t rip = rf.rip;
     uint64_t base = rip;
     const uint8_t *ip = (const uint8_t *)rip;
     if (avxemu_test_ud2 && ip[0] == 0x0F && ip[1] == 0x0B) base = rip + 2;  /* skip injected ud2 */
@@ -408,7 +452,7 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
     __asm__ volatile("" ::: "memory");             /* decode's reads stay before this one */
     if (g_reloc_enabled) {
         int k = site_lookup(base);
-        if (k >= 0 && g_hot[k].patched) { ss->__rip = base; return; }
+        if (k >= 0 && g_hot[k].patched) { avxemu_context_set_ip(uctx, base); return; }
     }
     if (!dl) { chain(sig, info, uctx); return; }   /* genuine #UD: let it surface */
     uint64_t rip_next = base + d.len;
@@ -417,11 +461,11 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
     if (faulthist_enabled() && ((++g_faulthist_total & 0x7FFF) == 0)) faulthist_dump();
 
     /* AVXEMU_FAULTSNAP diagnostic: every 1024th fault, dump rip + GPRs and any
-     * printable string data the pointer-looking registers reach (vm_read-guarded,
+     * printable string data the pointer-looking registers reach (guarded reads,
      * in-process — works where a debugger can't attach through the fault stream).
      * Identifies WHAT data the hot loop is chewing on. */
     if (faultsnap_enabled() && ((++g_faultsnap_total & 0x3FF) == 0))
-        faultsnap_dump(base, ss);
+        faultsnap_dump(base, &rf);
 
     /*
      * Fault-driven relocation — relocate BEFORE emulate. Once `base` has trapped
@@ -483,7 +527,7 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
             }
             reloc_unlock(&saved);
             if (won || g_hot[slot].patched) {
-                ss->__rip = (uint64_t)base;   /* re-enter: the patched jmp runs the op once */
+                avxemu_context_set_ip(uctx, base);   /* re-enter: the patched jmp runs the op once */
                 return;
             }
             /* declined -> fall through and emulate this instance normally */
@@ -493,27 +537,16 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
     /* Snapshot the signal's machine state into a register-file, run the shared
      * core, and write the (possibly modified) state back. The same core runs
      * from the trampoline path, so there is exactly one emulation code path. */
-    for (int i = 0; i < 16; i++) {
-        memcpy(rf.ymm[i],      &xmm[i],  16);
-        memcpy(rf.ymm[i] + 16, &ymmh[i], 16);
-        rf.gpr[i] = *gpr_ptr(ss, i);
-    }
-    rf.rflags = ss->__rflags;
-    rf.rip    = base;
+    rf.rip = base;
 
     if (!avxemu_emulate(&d, &rf)) { chain(sig, info, uctx); return; }
 
-    for (int i = 0; i < 16; i++) {
-        memcpy(&xmm[i],  rf.ymm[i],      16);
-        memcpy(&ymmh[i], rf.ymm[i] + 16, 16);
-        *gpr_ptr(ss, i) = rf.gpr[i];
-    }
-    ss->__rflags = rf.rflags;
-    /* A relocatable site resumes at its out-of-line tail, never at rip_next:
-     * rip_next may be inside the 5 bytes a later patch overwrites (reloc.c,
-     * avxemu_reloc_prepare). */
-    ss->__rip    = (slot >= 0 && g_hot[slot].state == SITE_RELOCATABLE)
-                 ? (uint64_t)(uintptr_t)g_hot[slot].resume : rip_next;
+    /* A prepared site resumes at its out-of-line tail: the following bytes
+     * may become part of a later five-byte jump. */
+    rf.rip = rip_next;
+    if (!avxemu_context_write(uctx, &rf, 1)) { chain(sig, info, uctx); return; }
+    if (slot >= 0 && g_hot[slot].state == SITE_RELOCATABLE)
+        avxemu_context_set_ip(uctx, (uintptr_t)g_hot[slot].resume);
 }
 
 /*
@@ -525,156 +558,33 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
  * we keep first crack at the ones we emulate. Everything else passes through.
  */
 int avxemu_sigaction(int sig, const struct sigaction *act, struct sigaction *old){
-    if (sig == SIGILL && g_owned_sigill && act && act->sa_sigaction != on_sigill) {
-        if (old) *old = g_old;       /* report the handler we're chaining to */
-        g_old = *act;                /* chain unrecognised #UDs here */
-        return 0;
+    /* Resolution may enumerate loader metadata; it must precede the lock. */
+    if (!avxemu_loader_resolve()) { errno=ENOSYS; return -1; }
+    sigset_t saved; policy_enter(&saved);
+    policy_slot *slot=policy_for(sig);
+    policy_state previous;
+    if(slot) previous=policy_current(slot);
+    if(!slot || !previous.owned) {
+        int result=avxemu_real_sigaction(sig,act,old);
+        policy_leave(&saved);
+        return result;
     }
-    /* When our crash handler is installed (the over-read fixup), stay frontline
-     * for the crash signals so we get first crack before the runtime's reporter
-     * (and the reporter still fires for genuine crashes). */
-    if (g_owns_crash && act && act->sa_sigaction != on_crash &&
-        (sig == SIGSEGV || sig == SIGBUS)) {
-        struct sigaction *slot = (sig==SIGSEGV)?&g_old_segv:&g_old_bus;
-        if (old) *old = *slot;
-        *slot = *act;
-        return 0;
+    /* act and old may alias. Publish only after kernel success, under the same
+     * lock as snapshots, competing replacements and one-shot claims. */
+    if(act) {
+        struct sigaction replacement=*act;
+        if(install_owned(sig,&replacement)) { policy_leave(&saved); return -1; }
+        policy_publish(slot,&replacement,1);
     }
-    return real_sigaction()(sig, act, old);
+    if(old) *old=previous.action;
+    policy_leave(&saved);
+    return 0;
 }
 void (*avxemu_signal(int sig, void (*h)(int)))(int){
-    /* BSD signal() installs a persistent, SA_RESTART handler — match that so we
-     * don't silently turn syscall restarts into EINTR for the caller. */
     struct sigaction a, o; memset(&a,0,sizeof a);
     a.sa_handler = h; a.sa_flags = SA_RESTART; sigemptyset(&a.sa_mask);
-    if (sig == SIGILL && g_owned_sigill) {
-        avxemu_sigaction(SIGILL, &a, &o);
-        return (o.sa_flags & SA_SIGINFO) ? (void(*)(int))o.sa_sigaction : o.sa_handler;
-    }
-    if (real_sigaction()(sig, &a, &o) != 0) return SIG_ERR;
+    if (avxemu_sigaction(sig, &a, &o) != 0) return SIG_ERR;
     return (o.sa_flags & SA_SIGINFO) ? (void(*)(int))o.sa_sigaction : o.sa_handler;
-}
-__attribute__((used)) static const struct { const void *r, *o; }
-  _interpose_sigaction __attribute__((section("__DATA,__interpose"))) =
-    { (const void*)avxemu_sigaction, (const void*)sigaction },
-  _interpose_signal __attribute__((section("__DATA,__interpose"))) =
-    { (const void*)avxemu_signal, (const void*)signal };
-
-/*
- * Fallback interposition, for when dyld won't do it for us.
- *
- * 10.9's dyld registers __DATA,__interpose ONLY for DYLD_INSERT_LIBRARIES
- * images. Baked into a binary as a plain LC_LOAD_DYLIB — the tidier way to
- * attach the emulator, since it then cannot leak into child processes — the
- * overrides above are silently ignored: the runtime's crash reporter takes
- * SIGILL and the first emulated instruction becomes an "illegal instruction"
- * crash report. (Observed exactly that with Claude Code: Bun's crash banner,
- * then a hang.)
- *
- * So produce dyld's end state by hand. For each image, walk the lazy and
- * non-lazy symbol pointer sections through the indirect symbol table and
- * repoint the sigaction/signal slots at ours. Idempotent, so it costs nothing
- * when dyld did interpose — those slots already hold our addresses and are
- * skipped. AVXEMU_NO_REBIND=1 opts out.
- *
- * Deliberately not touched: our own image, and the system libraries under
- * /usr/lib and /System. The runtime and whatever it bundles are what install
- * crash handlers; rewriting libsystem's own call sites buys nothing and is a
- * good way to find a reentrancy problem.
- */
-/* Our own image's mach header, found by asking which loaded image contains one
- * of our own functions.
- *
- * Not _mh_dylib_header: the linker defines that only for MH_DYLIB output, so a
- * reference to it fails to link every test target that pulls handler.o into an
- * executable ("Undefined symbols: __mh_dylib_header"). Neither weak_import nor
- * weak rescues it -- both still need the symbol to exist somewhere. dladdr()
- * would be the obvious alternative, but it and Dl_info are Darwin extensions
- * that this file's strict _XOPEN_SOURCE hides (same trap as MAP_ANON above).
- * The dyld image APIs are already in use here and are not hidden, so use those. */
-static const struct mach_header_64 *avxemu_self_header(void) {
-    static const struct mach_header_64 *self;
-    static int done;
-    if (!done) { self = avxemu_darwin_self_image(); done = 1; }
-    return self;
-}
-
-static int rebind_sym_in_image(const struct mach_header_64 *mh, intptr_t slide,
-                               const char *want, const void *repl) {
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    const struct symtab_command *st = 0;
-    const struct dysymtab_command *dy = 0;
-    uintptr_t le_base = 0;
-
-    for (uint32_t c = 0; c < mh->ncmds; c++) {
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-            if (!strcmp(sg->segname, "__LINKEDIT"))
-                le_base = (uintptr_t)slide + (uintptr_t)sg->vmaddr - (uintptr_t)sg->fileoff;
-        } else if (lc->cmd == LC_SYMTAB) {
-            st = (const struct symtab_command *)lc;
-        } else if (lc->cmd == LC_DYSYMTAB) {
-            dy = (const struct dysymtab_command *)lc;
-        }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
-    if (!st || !dy || !le_base || !dy->nindirectsyms) return 0;
-
-    const struct nlist_64 *syms = (const struct nlist_64 *)(le_base + st->symoff);
-    const char *strs = (const char *)(le_base + st->stroff);
-    const uint32_t *indirect = (const uint32_t *)(le_base + dy->indirectsymoff);
-
-    int n = 0;
-    lc = (const struct load_command *)(mh + 1);
-    for (uint32_t c = 0; c < mh->ncmds; c++) {
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-            const struct section_64 *sect = (const struct section_64 *)(sg + 1);
-            for (uint32_t s = 0; s < sg->nsects; s++) {
-                uint32_t type = sect[s].flags & SECTION_TYPE;
-                if (type != S_LAZY_SYMBOL_POINTERS && type != S_NON_LAZY_SYMBOL_POINTERS)
-                    continue;
-                const void **slot = (const void **)((uintptr_t)slide + (uintptr_t)sect[s].addr);
-                uint32_t nslots = (uint32_t)(sect[s].size / sizeof(void *));
-                for (uint32_t k = 0; k < nslots; k++) {
-                    uint32_t si = indirect[sect[s].reserved1 + k];
-                    if (si >= dy->nindirectsyms + dy->indirectsymoff) continue;
-                    if (si & (INDIRECT_SYMBOL_ABS | INDIRECT_SYMBOL_LOCAL)) continue;
-                    if (si >= st->nsyms) continue;
-                    const char *nm = strs + syms[si].n_un.n_strx;
-                    if (strcmp(nm, want)) continue;
-                    if (slot[k] == repl) continue;          /* dyld already did it */
-                    uintptr_t page = (uintptr_t)&slot[k] & ~(uintptr_t)(PAGE_SIZE - 1);
-                    if (mprotect((void *)page, PAGE_SIZE, PROT_READ | PROT_WRITE) != 0)
-                        continue;
-                    slot[k] = repl;
-                    n++;
-                }
-            }
-        }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-    }
-    return n;
-}
-
-/* Pointers the rebind actually rewrote. Test hook (linkhook): with the rebind
- * off it must stay 0, which tells "dyld interposed us itself" (it does, for
- * linked images, on macOS newer than 10.9) apart from "the rebind ran anyway". */
-int avxemu_rebind_count;
-
-static void avxemu_rebind_image(const struct mach_header *mhp, intptr_t slide) {
-    const struct mach_header_64 *mh = (const struct mach_header_64 *)mhp;
-    if (!mh || mh->magic != MH_MAGIC_64) return;
-    if (mh == avxemu_self_header()) return;                 /* never ourselves */
-
-    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-        if ((const struct mach_header_64 *)_dyld_get_image_header(i) != mh) continue;
-        const char *nm = _dyld_get_image_name(i);
-        if (nm && (!strncmp(nm, "/usr/lib/", 9) || !strncmp(nm, "/System/", 8))) return;
-        break;
-    }
-    avxemu_rebind_count += rebind_sym_in_image(mh, slide, "_sigaction", (const void *)avxemu_sigaction);
-    avxemu_rebind_count += rebind_sym_in_image(mh, slide, "_signal",    (const void *)avxemu_signal);
 }
 
 /*
@@ -706,26 +616,18 @@ static int cpu_has_everything(void) {
 
 __attribute__((constructor))
 static void avxemu_install(void) {
+    /* Even an inert image can forward sigaction from an application handler.
+     * Prepare genuine functions here, without activating loader rebinding. */
+    (void)avxemu_loader_resolve();
     if (getenv("AVXEMU_DISABLE")) return;     /* opt-out escape hatch */
     if (cpu_has_everything()) return;         /* nothing to emulate: stay inert */
     if (!avxemu_image_init()) { emit("avxemu: cannot initialize executable metadata\n"); return; }
     if (!avxemu_page_size()) { emit("avxemu: cannot determine page size\n"); return; }
-    struct sigaction sa;
-    memset(&sa, 0, sizeof sa);
-    sa.sa_sigaction = on_sigill;
-    sa.sa_flags = SA_SIGINFO | SA_RESTART;
-    sigemptyset(&sa.sa_mask);
-    if (real_sigaction()(SIGILL, &sa, &g_old) != 0) {
+    if (!avxemu_loader_init()) { emit("avxemu: cannot initialize loader\n"); return; }
+    if (policy_take(SIGILL) != 0) {
         emit("avxemu: failed to install SIGILL handler\n");
         return;
     }
-    g_owned_sigill = 1;
-
-    /* Keep that ownership even when dyld won't interpose for us (see above).
-     * Registering fires the callback for every image already loaded and for
-     * each one loaded later, so dlopened plugins are covered too. */
-    if (!getenv("AVXEMU_NO_REBIND"))
-        _dyld_register_func_for_add_image(avxemu_rebind_image);
 
     /* Fault-driven relocation is on by default; AVXEMU_RELOC=0 disables it so the
      * A/B harness can compare emulate-only vs relocate. */
@@ -769,11 +671,7 @@ static void avxemu_install(void) {
         static char altstk[64*1024];
         stack_t ss2; ss2.ss_sp = altstk; ss2.ss_size = sizeof altstk; ss2.ss_flags = 0;
         sigaltstack(&ss2, 0);
-        struct sigaction ca; memset(&ca, 0, sizeof ca);
-        ca.sa_sigaction = on_crash; ca.sa_flags = SA_SIGINFO | SA_RESTART | SA_ONSTACK; sigemptyset(&ca.sa_mask);
-        sigaction(SIGSEGV, &ca, &g_old_segv);
-        sigaction(SIGBUS,  &ca, &g_old_bus);
-        g_owns_crash = 1;
+        if (!policy_take(SIGSEGV) && policy_take(SIGBUS)) policy_release(SIGSEGV);
     }
 
     /* Preflight: validate the whole path on this exact CPU, then exit. */
@@ -785,7 +683,7 @@ static void avxemu_install(void) {
  * one that has everything, where the constructor stays inert; where the constructor did install
  * it, once is enough. */
 void avxemu_force_install(void) {
-    if (g_owned_sigill) return;
+    if (policy_owned(SIGILL)) return;
     g_force_install = 1;
     avxemu_install();
 }
