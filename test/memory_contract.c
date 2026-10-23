@@ -2,6 +2,7 @@
 #undef NDEBUG
 #include <assert.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,6 +55,71 @@ static void patch_permissions(unsigned char *p, size_t page, unsigned prot) {
     assert(p[page + 7] == 0x90);
     if (!(prot & AVXEMU_PROT_W)) expect_fault(p + page + 7, 1);
 }
+
+/* Threads share an address space, so exactly one non-overwriting mapping
+ * may win. Both contenders must finish before checking the mapped contents. */
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t condition;
+    int ready, go, wins;
+    uintptr_t address;
+    size_t page;
+} mapping_race;
+
+static void *map_contender(void *arg) {
+    mapping_race *race = arg;
+    assert(!pthread_mutex_lock(&race->mutex));
+    race->ready++;
+    assert(!pthread_cond_broadcast(&race->condition));
+    while (!race->go) assert(!pthread_cond_wait(&race->condition, &race->mutex));
+    assert(!pthread_mutex_unlock(&race->mutex));
+    int won = avxemu_memory_map_gap(race->address, race->page);
+    if (won) *(volatile unsigned char *)race->address = 0x73;
+    assert(!pthread_mutex_lock(&race->mutex));
+    race->wins += won;
+    assert(!pthread_mutex_unlock(&race->mutex));
+    return NULL;
+}
+
+static void concurrent_gap(size_t page) {
+    /* Retain neighboring pages so a thread stack cannot consume the gap. */
+    unsigned char *p = mmap(NULL, 3 * page, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    assert(p != MAP_FAILED);
+    assert(!munmap(p + page, page));
+    mapping_race race = {PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER,
+                         0, 0, 0, (uintptr_t)(p + page), page};
+    pthread_t threads[2];
+    for (int i = 0; i < 2; i++) assert(!pthread_create(&threads[i], NULL, map_contender, &race));
+    assert(!pthread_mutex_lock(&race.mutex));
+    while (race.ready != 2) assert(!pthread_cond_wait(&race.condition, &race.mutex));
+    race.go = 1;
+    assert(!pthread_cond_broadcast(&race.condition));
+    assert(!pthread_mutex_unlock(&race.mutex));
+    for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
+    assert(race.wins == 1 && p[page] == 0x73);
+    assert(!munmap(p, 3 * page));
+    assert(!pthread_cond_destroy(&race.condition));
+    assert(!pthread_mutex_destroy(&race.mutex));
+}
+
+#ifdef __linux__
+static void query_failure(size_t page) {
+    pid_t child = fork();
+    assert(child >= 0);
+    if (!child) {
+        struct rlimit limit = {0, 0};
+        assert(!setrlimit(RLIMIT_NOFILE, &limit));
+        avxemu_mapping mapping = {11, 22, 33}, saved = mapping;
+        assert(avxemu_memory_query((uintptr_t)&limit, &mapping) == -1);
+        assert(!memcmp(&mapping, &saved, sizeof mapping));
+        assert(!avxemu_memory_map_gap(page, page));
+        _exit(0);
+    }
+    int status;
+    assert(waitpid(child, &status, 0) == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+#endif
 
 int main(void) {
     size_t page = avxemu_page_size();
@@ -121,6 +187,10 @@ int main(void) {
     assert(avxemu_memory_alloc_near(site, 0) == NULL);
     assert(avxemu_memory_alloc_near(site, SIZE_MAX) == NULL);
     assert(munmap(p, 8 * page) == 0);
+#ifdef __linux__
+    query_failure(page);
+#endif
+    for (int i = 0; i < 100; i++) concurrent_gap(page);
     puts("memory-contract: all checks passed");
     return 0;
 }
