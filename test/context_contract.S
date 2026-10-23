@@ -142,4 +142,14 @@ AVXEMU_FUNCTION(context_probe)
  ret
 AVXEMU_END_FUNCTION(context_probe)
 
+#ifdef __linux__
+AVXEMU_FUNCTION(context_initial_probe)
+ vzeroall
+ ud2
+ vmovdqu %ymm0, AVXEMU_SYM(context_initial_output)(%rip)
+ vzeroupper
+ ret
+AVXEMU_END_FUNCTION(context_initial_probe)
+#endif
+
 AVXEMU_GNU_STACK
