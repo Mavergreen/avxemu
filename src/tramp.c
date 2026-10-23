@@ -1266,6 +1266,10 @@ static int emit_minspill_bzhi(uint8_t **p, const decoded *d, uint64_t resume){
      * test D,D sets ZF=(D==0) and SF=sign-bit-of-D simultaneously.
      * setz/sets read those bits WITHOUT modifying rflags; shifts after are fine. */
     gb_test(p, w, D, D);              /* ZF=(result==0), SF=bit(opsize-1) of result */
+    /* SETcc writes only a byte; discard the earlier mask/value before it
+     * becomes a full-width flags operand. MOV preserves the TEST flags. */
+    gb_mov_imm32(p, T1, 0);
+    gb_mov_imm32(p, T2, 0);
     gb_setz(p, T1);                    /* T1 = ZF (result==0) */
     gb_sets(p, T2);                    /* T2 = SF (sign bit of result) */
     gb_shl_imm(p, 1, T1, 6);         /* T1 = ZF<<6  (bit position of ZF in rflags) */
@@ -1341,6 +1345,9 @@ static int pick3(int D, int S, int *T1, int *T2, int *T3){
  *   T1 = CF | (ZF<<6) | (SF<<7) ; OF=0 (always 0 for BLSR/BLSI/BLSMSK). */
 static void emit_zfsf_bits(uint8_t **p, int w, int D, int T1, int T2, int T3){
     gb_test(p, w, D, D);         /* ZF=(D==0), SF=bit(opsize-1) of D; CF=OF=0 */
+    /* Scratch still contains the result and arbitrary incoming high bits. */
+    gb_mov_imm32(p, T2, 0);
+    gb_mov_imm32(p, T3, 0);
     gb_setz(p, T2);               /* T2 = ZF bit (0 or 1)  [setz doesn't touch flags] */
     gb_sets(p, T3);               /* T3 = SF bit (0 or 1)  [sets  doesn't touch flags] */
     gb_shl_imm(p, 1, T2, 6);    /* T2 = ZF<<6  (bit-6 position in rflags) */
