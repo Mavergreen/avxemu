@@ -1,153 +1,119 @@
-/*
- * patch_mem.c — in-memory lzcnt/tzcnt patcher.
- *
- * lzcnt/tzcnt don't fault on pre-Haswell CPUs — they silently run as bsr/bsf
- * (wrong results). They can't be trap-and-emulated like AVX2, so at load we
- * rewrite each one's F3 prefix to F0 (lock) *in the running process's memory*,
- * making it `lock bsr/bsf` (#UD) so the SIGILL handler emulates the correct
- * lzcnt/tzcnt. The on-disk binary is never modified; this only touches mapped
- * code pages, only on CPUs that lack LZCNT, only where the emulator is present.
- *
- * Instructions are located with a length-aware, function-start-guided,
- * recursive-descent scan (lde.c) so embedded jump-table data is never patched.
- */
-
+/* In-memory LZCNT/TZCNT prefix edits, scoped to executable image ranges. */
 #include "lde.h"
+#include "avxemu_cpuid.h"
+#include "lcache.h"
+#include "image.h"
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <stdlib.h>
-#include <mach/mach.h>
-#include <mach-o/dyld.h>
-#include <mach-o/loader.h>
-#include <cpuid.h>
 
-extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
-#include "lcache.h"
-#include "platform/darwin/image.h"
-
-static void emit(const char *s){ (void)write(2, s, strlen(s)); }
-
-static int cpu_has_lzcnt(void) {
-    uint32_t r[4];
-    if (!avxemu_get_cpuid(0x80000001u, 0, r)) return 0;
-    return (r[2] >> 5) & 1;                       /* ECX[5] = LZCNT/ABM */
+static void restore(const avxemu_mapping *saved) {
+    if (!avxemu_memory_patch_end(saved)) {
+        static const char msg[] = "avxemu: fatal: cannot restore patch page permissions\n";
+        (void)write(2, msg, sizeof msg - 1); _exit(127);
+    }
 }
 
-static uint64_t uleb(const uint8_t **p, const uint8_t *e) {
-    uint64_t r = 0; int s = 0; uint8_t x;
-    do { if (*p >= e) return r; x = *(*p)++; r |= (uint64_t)(x & 0x7f) << s; s += 7; } while (x & 0x80);
-    return r;
+/* Startup-only write spans. Split at mapping boundaries and retain every
+ * original permission, including when a later mapping refuses the change. */
+void avxemu_patch_write_end(avxemu_mapping *saved, size_t count) {
+    while (count) restore(&saved[--count]);
+    free(saved);
 }
 
-/* Patch all lzcnt/tzcnt in the main executable. Returns the number patched. */
-long avxemu_patch_lzcnt(void) {
-    /* Native lzcnt works -> nothing to do. AVXEMU_FORCEPATCH overrides this so
-     * the full parse/patch path can be exercised on an AVX2 dev host (every
-     * patched site then traps and is emulated, proving the whole chain). */
-    if (cpu_has_lzcnt() && !getenv("AVXEMU_FORCEPATCH")) return 0;
-
-    intptr_t slide;
-    const struct mach_header_64 *mh = avxemu_main_image(&slide, 0);
-    if (!mh) return 0;
-
-    uint64_t textseg_vm = 0, textseg_sz = 0, text_addr = 0, text_size = 0, le_vm = 0, le_off = 0;
-    uint32_t fs_off = 0, fs_size = 0;
-    const struct load_command *lc = (const struct load_command *)(mh + 1);
-    for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-            if (!strcmp(sg->segname, "__TEXT")) {
-                textseg_vm = sg->vmaddr; textseg_sz = sg->vmsize;
-                const struct section_64 *s = (const struct section_64 *)(sg + 1);
-                for (uint32_t j = 0; j < sg->nsects; j++)
-                    if (!strcmp(s[j].sectname, "__text")) { text_addr = s[j].addr; text_size = s[j].size; }
-            } else if (!strcmp(sg->segname, "__LINKEDIT")) { le_vm = sg->vmaddr; le_off = sg->fileoff; }
-        } else if (lc->cmd == LC_FUNCTION_STARTS) {
-            const struct linkedit_data_command *ld = (const struct linkedit_data_command *)lc;
-            fs_off = ld->dataoff; fs_size = ld->datasize;
+avxemu_mapping *avxemu_patch_write_begin(uintptr_t address, size_t size, size_t *count) {
+    if (!size || size > UINTPTR_MAX - address) return 0;
+    avxemu_mapping *saved = 0;
+    size_t used = 0, capacity = 0;
+    while (size) {
+        avxemu_mapping mapping;
+        if (avxemu_memory_query(address, &mapping) != 1 ||
+            mapping.end <= address) goto fail;
+        size_t chunk = mapping.end - address;
+        if (chunk > size) chunk = size;
+        if (used == capacity) {
+            if (capacity > SIZE_MAX / 2 / sizeof *saved) goto fail;
+            size_t next = capacity ? capacity * 2 : 4;
+            avxemu_mapping *p = realloc(saved, next * sizeof *p);
+            if (!p) goto fail;
+            saved = p; capacity = next;
         }
-        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+        if (!avxemu_memory_patch_begin(address, chunk, &saved[used])) goto fail;
+        used++; address += chunk; size -= chunk;
     }
-    if (!text_addr || !fs_off) return 0;
+    *count = used;
+    return saved;
+fail:
+    avxemu_patch_write_end(saved, used);
+    return 0;
+}
 
-    uint8_t *text = (uint8_t *)(text_addr + slide);
-    size_t readable = (size_t)((textseg_vm + textseg_sz) - text_addr);   /* __text + following __TEXT data */
-
-    /* Make __text writable. A Mach-O __TEXT segment's *maximum* protection is
-     * r-x (write is forbidden even as a ceiling), so plain mprotect(PROT_WRITE)
-     * is rejected with EACCES. VM_PROT_COPY forces a private copy-on-write of
-     * the region and grants write to that copy, the standard way to patch code
-     * on macOS. We then restore r-x; execution runs from the patched copy.
-     * EXECUTE stays on throughout: this is the whole __text, and whatever is
-     * running from it meanwhile (other threads, or avxemu itself when it is
-     * linked into the main image) must not fault. */
-    mach_port_t task = mach_task_self();
-    uintptr_t lo = (uintptr_t)text & ~(uintptr_t)0xfff;
-    uintptr_t hi = ((uintptr_t)text + text_size + 0xfff) & ~(uintptr_t)0xfff;
-    kern_return_t kr = vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                                  VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY);
-    if (kr != KERN_SUCCESS) {
-        emit("avxemu: vm_protect(__text, COPY) failed — lzcnt/tzcnt NOT patched\n");
-        avxemu_lc_rec_fail();
-        return 0;
-    }
-
-    /* lcache.c: replay the prefix edits instead of finding them -- each checked
-     * against the byte actually there before any is written. */
-    if (avxemu_lc_mode == LC_REPLAY) {
-        const lc_byte *b; uint32_t n = avxemu_lc_bytes(&b);
-        int ok = 1;
-        for (uint32_t i = 0; i < n && ok; i++) ok = b[i].off < text_size && text[b[i].off] == b[i].old;
-        if (ok) {
-            for (uint32_t i = 0; i < n; i++) text[b[i].off] = b[i].neu;
-            vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-                       VM_PROT_READ | VM_PROT_EXECUTE);
-            return (long)n;
+/* Individual functions never cross executable range boundaries. */
+long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required, int recursive) {
+    if (!image || !required) return 0;
+    long patched = 0;
+    for (size_t ri = 0; ri < image->nranges; ri++) {
+        const avxemu_code_range *range = &image->ranges[ri];
+        uint8_t *text = range->base;
+        size_t nsaved;
+        avxemu_mapping *saved = avxemu_patch_write_begin((uintptr_t)text, range->size, &nsaved);
+        if (!saved) {
+            avxemu_lc_rec_fail(); continue;
         }
-        avxemu_lc_invalid();
-    }
-    /* Recording: the pass edits bytes in place in several places (lde.c), so
-     * take its result as the difference it made rather than instrument each. */
-    uint8_t *before = 0;
-    if (avxemu_lc_mode == LC_RECORD) {
-        before = malloc((size_t)text_size);
-        if (before) memcpy(before, text, (size_t)text_size); else avxemu_lc_rec_fail();
-    }
-
-    const uint8_t *fp = (const uint8_t *)(le_vm + slide + (fs_off - le_off));
-    const uint8_t *fe = fp + fs_size;
-    uint64_t addr = textseg_vm; long patched = 0; size_t res[256];
-    uint64_t prev = 0;
-    while (fp < fe) {
-        uint64_t delta = uleb(&fp, fe); if (!delta) break;
-        addr += delta;
-        if (prev) {
-            uint64_t fstart = prev, fend = addr;
-            if (fstart >= text_addr && fstart < text_addr + text_size) {
-                if (fend > text_addr + text_size) fend = text_addr + text_size;
-                patched += lde_scan_func(text, fstart - text_addr, fend - text_addr,
-                                         readable, 1, res, 256);
+        if (avxemu_lc_mode == LC_REPLAY && image->nranges == 1) {
+            const lc_byte *b; uint32_t n = avxemu_lc_bytes(&b);
+            int ok = 1;
+            for (uint32_t i = 0; i < n && ok; i++)
+                ok = b[i].off < range->size && text[b[i].off] == b[i].old;
+            if (ok) {
+                for (uint32_t i = 0; i < n; i++) text[b[i].off] = b[i].neu;
+                patched += (long)n;
+                avxemu_patch_write_end(saved, nsaved); continue;
             }
+            avxemu_lc_invalid();
         }
-        prev = addr;
+        uint8_t *before = 0;
+        if (avxemu_lc_mode == LC_RECORD && image->nranges == 1) {
+            before = malloc(range->size);
+            if (before) memcpy(before, text, range->size);
+            else avxemu_lc_rec_fail();
+        }
+        for (size_t fi = 0; fi < image->nfunctions; fi++) {
+            const avxemu_function *f = &image->functions[fi];
+            if (f->range != ri || f->begin >= f->end || f->end > range->size) continue;
+            size_t capacity = (f->end - f->begin) / 2 + 1;
+            if (capacity > SIZE_MAX / sizeof(size_t) || capacity > INT32_MAX) {
+                avxemu_lc_rec_fail(); continue;
+            }
+            size_t *sites = malloc(capacity * sizeof *sites);
+            if (!sites) { avxemu_lc_rec_fail(); continue; }
+            long n = lde_scan_func_mask(text, f->begin, f->end, range->readable,
+                                        1, required, recursive, sites, (int)capacity, avxemu_cpuid_trap);
+            if (n > 0) patched += n;
+            else if (n < 0) avxemu_lc_rec_fail();
+            free(sites);
+        }
+        /* Preserve Darwin's existing cold-code mop-up. ELF executable segments
+         * may contain arbitrary data; only reachable function code is eligible. */
+        if (!recursive) {
+            long n = lde_scan_zcnt_mask(text, range->size, 1, required);
+            if (n > 0) patched += n;
+        }
+        if (before) {
+            for (size_t i = 0; i < range->size; i++)
+                if (before[i] != text[i]) avxemu_lc_rec_byte((uint32_t)i, before[i], text[i]);
+            free(before);
+        }
+        avxemu_patch_write_end(saved, nsaved);
     }
-    if (prev && prev >= text_addr && prev < text_addr + text_size)        /* last function */
-        patched += lde_scan_func(text, prev - text_addr, text_size, readable, 1, res, 256);
-
-    /* Linear mop-up: the function-start recursive-descent scan never enters
-     * blocks unreachable from a function start (cold paths, tail regions the
-     * exports table doesn't bound). A final linear sweep catches the stragglers;
-     * sites already patched are now F0-prefixed and are skipped. */
-    { long lin = lde_scan_zcnt(text, (size_t)text_size, 1); if (lin > 0) patched += lin; }
-
-    if (before) {
-        for (size_t i = 0; i < (size_t)text_size; i++)
-            if (before[i] != text[i]) avxemu_lc_rec_byte((uint32_t)i, before[i], text[i]);
-        free(before);
-    }
-
-    vm_protect(task, (vm_address_t)lo, (vm_size_t)(hi - lo), FALSE,
-               VM_PROT_READ | VM_PROT_EXECUTE);
     return patched;
+}
+
+long avxemu_patch_lzcnt(void) {
+    uint32_t r7[4] = {0}, r8[4] = {0};
+    (void)avxemu_get_cpuid(7, 0, r7);
+    (void)avxemu_get_cpuid(0x80000001u, 0, r8);
+    unsigned required = avxemu_zcnt_required(r7[1], r8[2], getenv("AVXEMU_FORCEPATCH") != 0);
+    return avxemu_patch_zcnt_image(avxemu_image_main(), required, AVXEMU_SCAN_RECURSIVE);
 }

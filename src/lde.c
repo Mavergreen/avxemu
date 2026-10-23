@@ -179,15 +179,16 @@ static void cflow(const uint8_t *p, const uint8_t *end, int len, long insn_off,
     const uint8_t *nx = p + len;                 /* next instruction */
     if (op == 0xEB) { *term = 1; *tgt = insn_off + len + (int8_t)nx[-1]; }
     else if (op == 0xE9) { int32_t r; memcpy(&r, nx-4, 4); *term = 1; *tgt = insn_off + len + r; }
-    else if (op >= 0x70 && op <= 0x7F) { *tgt = insn_off + len + (int8_t)nx[-1]; }
+    else if ((op >= 0x70 && op <= 0x7F) || (op >= 0xe0 && op <= 0xe3)) {
+        *tgt = insn_off + len + (int8_t)nx[-1];
+    }
+    else if (op == 0xe8) { int32_t r; memcpy(&r, nx - 4, 4); *tgt = insn_off + len + r; }
     else if (op == 0x0F && q+1 < end && q[1] >= 0x80 && q[1] <= 0x8F) { int32_t r; memcpy(&r, nx-4, 4); *tgt = insn_off + len + r; }
     else if (op == 0xC3 || op == 0xC2 || op == 0xCB || op == 0xCA) *term = 1;     /* ret */
     else if (op == 0xF4) *term = 1;                                              /* hlt */
     else if (op == 0x0F && q+1 < end && q[1] == 0x0B) *term = 1;                 /* ud2 */
-    /* note: indirect jmp (ff /4,/5) is NOT treated as terminating — clang emits
-     * switch-case code immediately after the dispatch, and that code is real and
-     * reachable. The jump table itself lives elsewhere (rip-relative), so falling
-     * through doesn't decode table data. */
+    /* The linear target collector walks past indirect jumps. Recursive
+     * discovery terminates them and enters only resolved switch targets. */
 }
 
 /* is the instruction at p a `leaq disp(%rip), reg`? if so return its rip-rel
@@ -220,64 +221,31 @@ void lde_cflow(const uint8_t *p, const uint8_t *end, int len, long insn_off,
     *indirect = is_jmp_indirect(p, end);
 }
 
-long lde_rd_zcnt(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
-                 size_t *out, int maxout) {
-    size_t n = fend - fstart;
-    uint8_t *vis = calloc(n, 1); size_t *stk = malloc(n * sizeof(size_t));
-    if (!vis || !stk) { free(vis); free(stk); return 0; }
-    size_t sp = 0; long cnt = 0; long last_lea = -1;   /* table base offset from most recent leaq-rip */
-    /* Mark visited at PUSH time, not pop: a node enters the stack at most once,
-     * so sp never exceeds n (the stack has n slots). Marking on pop instead let a
-     * node reachable from many predecessors — high fan-in, or a dense switch table
-     * with repeated entries — be pushed once per in-edge, overrunning stk and
-     * corrupting the heap (cf. lde_rd_map's RD_PUSH guard, which this mirrors). */
-    #define Z_PUSH(X) do { size_t _x = (size_t)(X); \
-        if (_x >= fstart && _x < fend && !vis[_x - fstart] && sp < n) { \
-            vis[_x - fstart] = 1; stk[sp++] = _x; } } while (0)
-    Z_PUSH(fstart);
-    while (sp) {
-        size_t off = stk[--sp];
-        int zk, o2; int len = x86_len(text + off, text + fend, &zk, &o2);
-        if (len <= 0) continue;
-        if (zk && o2 >= 0 && text[off + o2] == 0xF3 && cnt < maxout) out[cnt++] = off;
-
-        int32_t disp;
-        if (is_lea_rip(text + off, text + fend, &disp))
-            last_lea = (long)(off + len) + disp;           /* table base (offset space) */
-        else if (is_jmp_indirect(text + off, text + fend) && last_lea >= 0) {
-            /* resolve switch table: 4-byte entries, target = base + entry */
-            for (int i = 0; i < 4096; i++) {
-                size_t e = (size_t)last_lea + 4 * i;
-                if (e + 4 > readable) break;
-                int32_t entry; memcpy(&entry, text + e, 4);
-                long tgt = last_lea + entry;
-                if (tgt < (long)fstart || tgt >= (long)fend) break;   /* past table */
-                Z_PUSH(tgt);
-            }
-        }
-        int term; long tgt;
-        cflow(text + off, text + fend, len, (long)off, &term, &tgt);
-        if (tgt >= 0) Z_PUSH(tgt);
-        if (!term) Z_PUSH(off + len);
-    }
-    #undef Z_PUSH
-    free(vis); free(stk);
-    return cnt;
+long lde_rd_zcnt(const uint8_t *text, size_t begin, size_t end, size_t readable,
+                 size_t *out, int capacity) {
+    if (capacity < 0) return -1;
+    return lde_scan_sites(text, begin, end, readable, LDE_LZCNT | LDE_TZCNT,
+                          1, out, (size_t)capacity, 0);
 }
 
-int lde_rd_map(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
-               uint8_t *code, uint8_t *tgt, int *has_indirect) {
+int lde_rd_map_traps(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
+                     uint8_t *code, uint8_t *tgt, int *has_indirect,
+                     lde_trap_lookup traps) {
+    if (fstart >= fend || fend > readable) return 0;
     size_t n = fend - fstart;
+    if (n > SIZE_MAX / sizeof(size_t)) return 0;
     size_t *stk = malloc(n * sizeof(size_t));
     if (!stk) return 0;
     size_t sp = 0; long last_lea = -1; *has_indirect = 0;
-    #define RD_PUSH(X) do { if (sp < n) stk[sp++] = (size_t)(X); } while (0)
-    stk[sp++] = fstart;
+    #define RD_PUSH(X) do { size_t _x = (size_t)(X); \
+        if (_x >= fstart && _x < fend && !code[_x - fstart]) { \
+            code[_x - fstart] = 2; stk[sp++] = _x; } } while (0)
+    RD_PUSH(fstart);
     while (sp) {
         size_t off = stk[--sp];
-        if (off < fstart || off >= fend || code[off - fstart]) continue;
+        if (off < fstart || off >= fend || code[off - fstart] == 1) continue;
         int zk, o2; int len = x86_len(text + off, text + fend, &zk, &o2);
-        if (len <= 0) continue;
+        if (len <= 0) { free(stk); return 0; }
         code[off - fstart] = 1;
 
         int32_t disp;
@@ -300,6 +268,9 @@ int lde_rd_map(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
         }
         int term; long t;
         cflow(text + off, text + fend, len, (long)off, &term, &t);
+        if (is_jmp_indirect(text + off, text + fend)) term = 1;
+        if (term && len == 2 && text[off] == 0x0f && text[off + 1] == 0x0b &&
+            traps && traps((uintptr_t)(text + off))) term = 0;
         if (t >= (long)fstart && (size_t)t < fend) {
             tgt[t - fstart] = 1;
             if (!code[t - fstart]) RD_PUSH(t);
@@ -311,44 +282,89 @@ int lde_rd_map(const uint8_t *text, size_t fstart, size_t fend, size_t readable,
     return 1;
 }
 
-long lde_scan_func(uint8_t *text, size_t fstart, size_t fend, size_t readable,
-                   int patch, size_t *out, int maxout) {
-    /* fast path: linear decode that reaches the boundary (padding-tolerant) */
-    size_t q = fstart; int nt = 0, ok = 1;
-    while (q < fend) {
-        if ((size_t)(fend - q) <= 16) {
-            int pad = 1;
-            for (size_t r = q; r < fend; r++) if (text[r]!=0 && text[r]!=0xCC && text[r]!=0x90) { pad = 0; break; }
-            if (pad) { q = fend; break; }
-        }
-        int zk, o2; int len = x86_len(text + q, text + fend, &zk, &o2);
-        if (len <= 0) { ok = 0; break; }
-        if (zk && o2 >= 0 && text[q + o2] == 0xF3 && nt < maxout) out[nt++] = q;
-        q += len;
-    }
-    if (!(ok && q == fend))                              /* dirty: recursive descent */
-        nt = (int)lde_rd_zcnt(text, fstart, fend, readable, out, maxout);
-
-    if (patch)
-        for (int i = 0; i < nt; i++) {
-            int zk, o2; x86_len(text + out[i], text + fend, &zk, &o2);
-            if (o2 >= 0 && text[out[i] + o2] == 0xF3) text[out[i] + o2] = 0xF0;
-        }
-    return nt;
+int lde_rd_map(const uint8_t *text, size_t begin, size_t end, size_t readable,
+               uint8_t *code, uint8_t *targets, int *has_indirect) {
+    return lde_rd_map_traps(text, begin, end, readable, code, targets, has_indirect, 0);
 }
 
-long lde_scan_zcnt(uint8_t *text, size_t n, int patch) {
+long lde_scan_sites(const uint8_t *text, size_t begin, size_t end,
+                    size_t readable, unsigned required, int recursive,
+                    size_t *out, size_t capacity, lde_trap_lookup traps) {
+    if (!text || (capacity && !out) || begin >= end || end > readable) return -1;
+    size_t n = end - begin, count = 0;
+    uint8_t *code = 0, *targets = 0;
+    if (recursive) {
+        int indirect;
+        code = calloc(n, 1); targets = calloc(n, 1);
+        if (!code || !targets ||
+            !lde_rd_map_traps(text, begin, end, readable, code, targets, &indirect, traps)) {
+            free(code); free(targets); return -1;
+        }
+    }
+    for (size_t q = begin; q < end;) {
+        if (!recursive && end - q <= 16) {
+            int padding = 1;
+            for (size_t r = q; r < end; r++)
+                if (text[r] != 0 && text[r] != 0xcc && text[r] != 0x90) { padding = 0; break; }
+            if (padding) break;
+        }
+        if (code && !code[q - begin]) { q++; continue; }
+        int zk, prefix;
+        int len = x86_len(text + q, text + end, &zk, &prefix);
+        if (len <= 0) { free(code); free(targets); return -1; }
+        unsigned op = (unsigned)zk;
+        if (len == 2 && text[q] == 0x0f && text[q + 1] == 0xa2) op = LDE_CPUID;
+        if ((op & required) && (op == LDE_CPUID ||
+            (prefix >= 0 && text[q + prefix] == 0xf3))) {
+            if (count == capacity) { free(code); free(targets); return -1; }
+            out[count++] = q;
+        }
+        q += (size_t)len;
+    }
+    free(code); free(targets);
+    return (long)count;
+}
+
+long lde_scan_func_mask(uint8_t *text, size_t begin, size_t end, size_t readable,
+                        int patch, unsigned required, int recursive,
+                        size_t *out, int capacity, lde_trap_lookup traps) {
+    if (capacity < 0) return -1;
+    long count = lde_scan_sites(text, begin, end, readable, required,
+                                recursive, out, (size_t)capacity, traps);
+    if (count < 0 && !recursive)
+        count = lde_scan_sites(text, begin, end, readable, required,
+                               1, out, (size_t)capacity, traps);
+    if (patch && count > 0)
+        for (long i = 0; i < count; i++) {
+            int zk, prefix;
+            x86_len(text + out[i], text + end, &zk, &prefix);
+            if (prefix >= 0) text[out[i] + prefix] = 0xf0;
+        }
+    return count;
+}
+
+long lde_scan_func(uint8_t *text, size_t begin, size_t end, size_t readable,
+                   int patch, size_t *out, int capacity) {
+    return lde_scan_func_mask(text, begin, end, readable, patch,
+                              LDE_LZCNT | LDE_TZCNT, 0, out, capacity, 0);
+}
+
+long lde_scan_zcnt_mask(uint8_t *text, size_t n, int patch, unsigned required) {
     uint8_t *end = text + n, *p = text;
     long count = 0;
     while (p < end) {
         int zk, off;
         int len = x86_len(p, end, &zk, &off);
-        if (len <= 0) return -1;                       /* desync */
-        if (zk && off >= 0 && p[off] == 0xF3) {
+        if (len <= 0) return -1;
+        if (((unsigned)zk & required) && off >= 0 && p[off] == 0xf3) {
             count++;
-            if (patch) p[off] = 0xF0;                  /* F3 -> F0 (lock) => #UD */
+            if (patch) p[off] = 0xf0;
         }
         p += len;
     }
     return count;
+}
+
+long lde_scan_zcnt(uint8_t *text, size_t n, int patch) {
+    return lde_scan_zcnt_mask(text, n, patch, LDE_LZCNT | LDE_TZCNT);
 }
