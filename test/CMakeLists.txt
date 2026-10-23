@@ -71,6 +71,40 @@ if(AVXEMU_BACKEND_TESTS_ONLY)
   target_include_directories(linux-image-no-id PRIVATE "${PROJECT_SOURCE_DIR}/src")
   target_link_libraries(linux-image-no-id PRIVATE image-backend-no-id)
   add_test(NAME linux-image-no-id COMMAND linux-image-no-id)
+  avxemu_objects(avxemu_linux_context "${PROJECT_SOURCE_DIR}/src/platform/linux/context.c"
+    "${PROJECT_SOURCE_DIR}/src/platform/linux/xstate.c")
+  add_executable(xstate-contract linux_xstate_contract.c
+    $<TARGET_OBJECTS:avxemu_linux_context> $<TARGET_OBJECTS:avxemu_linux_memory>)
+  target_compile_options(xstate-contract PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
+  target_include_directories(xstate-contract PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  add_test(NAME xstate-contract COMMAND xstate-contract)
+
+  # Runtime-backed contracts exercise the genuine signal policy, without
+  # publishing a Linux runtime target. Other backend tests stay constructor-free.
+  list(TRANSFORM AVXEMU_COMMON_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
+  list(TRANSFORM AVXEMU_ASM_SOURCES PREPEND "${PROJECT_SOURCE_DIR}/")
+  avxemu_objects(linux_contract_runtime ${AVXEMU_COMMON_SOURCES} ${AVXEMU_ASM_SOURCES}
+    "${PROJECT_SOURCE_DIR}/src/platform/linux/loader.c"
+    "${PROJECT_SOURCE_DIR}/src/platform/linux/image.c")
+  foreach(contract context-contract loader-contract linux-loader-failure linux-signal-contract)
+    string(REPLACE "-" "_" source "${contract}")
+    add_executable(${contract} "${source}.c" $<TARGET_OBJECTS:linux_contract_runtime>
+      $<TARGET_OBJECTS:avxemu_linux_context> $<TARGET_OBJECTS:avxemu_linux_memory>
+      $<TARGET_OBJECTS:avxemu_linux_host> $<TARGET_OBJECTS:avxemu_linux_elf>)
+    target_compile_options(${contract} PRIVATE ${AVXEMU_CORE_FLAGS} -UNDEBUG)
+    target_include_directories(${contract} PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(${contract} PRIVATE Threads::Threads ${CMAKE_DL_LIBS} m)
+    add_test(NAME ${contract} COMMAND ${contract})
+    set_tests_properties(${contract} PROPERTIES
+      ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1;AVXEMU_NOCACHE=1")
+  endforeach()
+  target_sources(context-contract PRIVATE context_contract.S)
+  target_link_options(linux-loader-failure PRIVATE -Wl,--wrap=dlvsym)
+  foreach(mode self recursive)
+    add_test(NAME linux-loader-failure-${mode} COMMAND linux-loader-failure)
+    set_tests_properties(linux-loader-failure-${mode} PROPERTIES
+      ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1;AVXEMU_NOCACHE=1;AVXEMU_RESOLVE_FAILURE=${mode}")
+  endforeach()
   get_property(backend_tests DIRECTORY PROPERTY TESTS)
   set_tests_properties(${backend_tests} PROPERTIES LABELS hermetic TIMEOUT 60)
   return()

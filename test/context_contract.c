@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "platform/context.h"
 #include <signal.h>
 #include <stdio.h>
@@ -28,10 +29,48 @@ static void inspect(int sig, siginfo_t *info, void *context) {
         memcmp(vector.ymm,after.ymm,sizeof vector.ymm)) adapter_fail=1;
 }
 
+#ifdef __linux__
+#include "platform/linux/xstate.h"
+#include <ucontext.h>
+extern void context_initial_probe(void);
+uint8_t context_initial_output[32];
+static void initialize_vector(int sig, siginfo_t *info, void *context) {
+    avxemu_xstate state;
+    avxemu_regfile rf;
+    ucontext_t *uc=context;
+    (void)info;
+    if (sig!=SIGILL || !avxemu_xstate_live(uc->uc_mcontext.fpregs,&state) ||
+        (state.active&4) || !avxemu_context_read(context,&rf,1)) {
+        adapter_fail=1;
+    } else {
+        for (int i=0; i<16; i++) for (int j=16; j<32; j++)
+            if (rf.ymm[i][j]) adapter_fail=1;
+        for (int j=0; j<32; j++) rf.ymm[0][j]=(uint8_t)(j+1);
+        rf.rip+=2;
+        if (!avxemu_context_write(context,&rf,1)) adapter_fail=1;
+        else return;
+    }
+    avxemu_context_set_ip(context,avxemu_context_ip(context)+2);
+}
+static int initial_sigreturn(void) {
+    struct sigaction action, old;
+    memset(&action,0,sizeof action); sigemptyset(&action.sa_mask);
+    action.sa_sigaction=initialize_vector; action.sa_flags=SA_SIGINFO;
+    if (sigaction(SIGILL,&action,&old)) return 1;
+    context_initial_probe();
+    if (sigaction(SIGILL,&old,0) || adapter_fail) return 1;
+    for (int j=0; j<32; j++) if (context_initial_output[j]!=(uint8_t)(j+1)) return 1;
+    return 0;
+}
+#endif
+
 int main(void) {
     unsigned saved, selected;
     unsigned short saved_x87, selected_x87;
     int fail = 0;
+#ifdef __linux__
+    if (initial_sigreturn()) { puts("FAIL initially inactive YMM sigreturn"); fail++; }
+#endif
     avxemu_force_install();
     avxemu_test_ud2 = 1;
     avxemu_regfile untouched, before;

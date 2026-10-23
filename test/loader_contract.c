@@ -1,4 +1,7 @@
 #define _XOPEN_SOURCE 700
+#ifdef __linux__
+#define _DEFAULT_SOURCE
+#endif
 #include "platform/context.h"
 #include "platform/loader.h"
 #include <errno.h>
@@ -10,6 +13,14 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef __linux__
+#define public_sigaction sigaction
+#define public_signal signal
+#else
+#define public_sigaction avxemu_sigaction
+#define public_signal avxemu_signal
+#endif
 
 extern void avxemu_force_install(void);
 extern int avxemu_test_ud2;
@@ -310,13 +321,13 @@ static int child(int mode) {
     if(mode==4 || mode==15) a.sa_flags=SA_RESETHAND;
     if(mode==5) { a.sa_sigaction=fault; a.sa_flags=SA_SIGINFO; }
     if(mode==9 || mode==10) { a.sa_handler=acknowledge; a.sa_flags=mode==9?SA_RESTART:0; }
-    if(avxemu_sigaction(SIGILL,&a,&o) || avxemu_sigaction(SIGILL,0,&o)) return 13;
+    if(public_sigaction(SIGILL,&a,&o) || public_sigaction(SIGILL,0,&o)) return 13;
     if(o.sa_handler!=a.sa_handler || o.sa_flags!=a.sa_flags || sigismember(&o.sa_mask,SIGUSR1)!=sigismember(&a.sa_mask,SIGUSR1)) return 14;
     if(avxemu_real_sigaction(SIGILL,0,&k) || k.sa_handler==a.sa_handler ||
        (k.sa_flags&SA_RESTART)!=(a.sa_flags&SA_RESTART)) return 15;
     if(mode==9 || mode==10) return interrupted_read(mode==9)||bad;
     if(mode==11) {
-        if(avxemu_signal(SIGILL,simple)!=simple || avxemu_sigaction(SIGILL,0,&o) || !(o.sa_flags&SA_RESTART)) return 19;
+        if(public_signal(SIGILL,simple)!=simple || avxemu_sigaction(SIGILL,0,&o) || !(o.sa_flags&SA_RESTART)) return 19;
         raise(SIGILL); raise(SIGILL); return calls==2&&!bad?0:18;
     }
     if(mode==13 || mode==14) {

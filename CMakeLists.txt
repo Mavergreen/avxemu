@@ -22,6 +22,12 @@ function(avxemu_objects name)
   target_include_directories(${name} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 endfunction()
 
+set(AVXEMU_COMMON_SOURCES
+  src/exec.c src/exec_bmi.c src/softfma.c src/names.c src/decode.c
+  src/lde.c src/emulate.c src/image.c src/cpuid.c src/patch_mem.c
+  src/tramp.c src/reloc.c src/handler.c src/lcache.c src/lcache.h)
+set(AVXEMU_ASM_SOURCES src/selftest.S src/selftest.c src/tramp.S)
+
 if(AVXEMU_BACKEND_TESTS_ONLY)
   if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     message(FATAL_ERROR "Backend-only contracts require x86-64 Linux")
@@ -60,14 +66,11 @@ message(STATUS "AVXEmu ${AVXEMU_VERSION}: build mode ${MAVERICKS_MODE}")
 
 option(AVXEMU_BUILD_UPDATER "Build the Sparkle updater (needs avxemu in the installed shipyard's product registry)" OFF)
 
-avxemu_objects(avxemu_core
-  src/exec.c src/exec_bmi.c src/softfma.c src/names.c src/decode.c
-  src/lde.c src/emulate.c src/image.c src/platform/darwin/image.c
-  src/platform/darwin/host.c src/platform/darwin/memory.c
-  src/platform/darwin/context.c src/platform/darwin/loader.c
-  src/cpuid.c src/patch_mem.c src/tramp.c src/reloc.c src/handler.c
-  src/lcache.c src/lcache.h)
-avxemu_objects(avxemu_asm src/selftest.S src/selftest.c src/tramp.S)
+avxemu_objects(avxemu_core ${AVXEMU_COMMON_SOURCES}
+  src/platform/darwin/image.c src/platform/darwin/host.c
+  src/platform/darwin/memory.c src/platform/darwin/context.c
+  src/platform/darwin/loader.c)
+avxemu_objects(avxemu_asm ${AVXEMU_ASM_SOURCES})
 
 add_library(avxemu SHARED $<TARGET_OBJECTS:avxemu_core> $<TARGET_OBJECTS:avxemu_asm>)
 set_target_properties(avxemu PROPERTIES
