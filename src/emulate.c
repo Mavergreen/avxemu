@@ -29,11 +29,16 @@ static void mem_read(void *dst, uint64_t ea, int n, int seg){
     uint8_t *d8 = (uint8_t*)dst;
     uint64_t b = fp + page; size_t n0 = (size_t)(b - ea);
     memcpy(d8, (void*)ea, n0);                       /* first page: fault if unmapped (genuine bad EA) */
-    /* trailing page(s): the backend reads what's mapped and returns an
-     * error instead of faulting (mincore is unreliable on 10.9). Zero the rest. */
+    /* Only a verified gap gets compatibility zeros. Mapped guards and unknown
+     * mappings retain native operand semantics. These are real operand reads,
+     * not diagnostic safe reads: a denied self-read syscall must not change
+     * a readable operand into zeros or conceal a genuine access fault. */
     size_t tail = (size_t)(end - b);
-    size_t got = avxemu_memory_read(d8 + n0, (uintptr_t)b, tail);
-    if (got < tail) memset(d8 + n0 + got, 0, tail - got);
+    avxemu_mapping mapping;
+    if (avxemu_memory_query((uintptr_t)b, &mapping) == 0)
+        memset(d8 + n0, 0, tail);
+    else
+        memcpy(d8 + n0, (const void *)(uintptr_t)b, tail);
 }
 static void mem_write(uint64_t ea, const void *src, int n, int seg){
     if (seg == 1)      for (int i=0;i<n;i++){ uint8_t v=((const uint8_t*)src)[i]; __asm__ volatile("movb %0,%%gs:(%1)"::"r"(v),"r"(ea+(uint64_t)i)); }

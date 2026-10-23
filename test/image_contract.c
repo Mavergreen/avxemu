@@ -9,7 +9,7 @@ int main(void) {
         {bytes + 64, 0x2000, 32, 32, AVXEMU_PROT_R | AVXEMU_PROT_X}
     };
     avxemu_function funcs[] = {{0, 4, 12}, {0, 16, 24}, {1, 0, 32}};
-    avxemu_image image = {ranges, 2, funcs, 3, 0};
+    avxemu_image image = {ranges, 2, funcs, 3, 0, 0, 0, AVXEMU_SCAN_STRICT};
     uint32_t r = 99; size_t off = 99;
     assert(avxemu_image_find(&image, (uintptr_t)bytes + 31, 1, &r, &off));
     assert(r == 0 && off == 31);
@@ -42,6 +42,21 @@ int main(void) {
     assert(!avxemu_image_find(&image, (uintptr_t)bytes + 64, 1, 0, 0));
     funcs[0].end = 40;
     assert(!avxemu_image_function(&image, (uintptr_t)bytes + 4));
+    funcs[0].end=12;
+    avxemu_data_span data[]={{0,12,16,0},{1,8,16,0}};
+    image.data=data; image.ndata=2;
+    assert(avxemu_image_data_valid(&image));
+    assert(avxemu_image_data_overlap(&image,0,10,3));
+    assert(!avxemu_image_data_overlap(&image,0,10,2));
+    assert(!avxemu_image_function(&image,(uintptr_t)bytes+72));
+    data[1]=(avxemu_data_span){0,15,18,0}; assert(!avxemu_image_data_valid(&image));
+    data[1]=(avxemu_data_span){2,0,8,0}; assert(!avxemu_image_data_valid(&image));
+    data[1]=(avxemu_data_span){1,8,40,0}; assert(!avxemu_image_data_valid(&image));
+    data[1]=(avxemu_data_span){1,8,8,0}; assert(!avxemu_image_data_valid(&image));
+    data[1]=(avxemu_data_span){1,8,16,0};
+    image.strategy=(avxemu_scan_strategy)2; assert(!avxemu_image_data_valid(&image));
+    image.strategy=AVXEMU_SCAN_STRICT; assert(avxemu_image_data_valid(&image));
+    data[1].begin=0; assert(!avxemu_image_data_valid(&image)); /* function entry is data */
     puts("image-contract: OK");
     return 0;
 }

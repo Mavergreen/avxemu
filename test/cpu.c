@@ -18,7 +18,7 @@
  */
 #define RAW_CPUID AVXEMU_RAW_ATTR
 
-static uint64_t xgetbv0(void) {
+RAW_CPUID static uint64_t xgetbv0(void) {
     uint32_t lo, hi;
     __asm__ volatile(".byte 0x0f,0x01,0xd0" : "=a"(lo), "=d"(hi) : "c"(0));
     return ((uint64_t)hi << 32) | lo;

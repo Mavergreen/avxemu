@@ -5,6 +5,10 @@
 #include <stdatomic.h>
 #include <string.h>
 
+/* Linux assigns nonpositive codes to kill/queue/tkill and other software
+ * sources. SI_KERNEL and instruction exception codes are positive. */
+int avxemu_signal_generated(const siginfo_t *info) { return info && info->si_code<=0; }
+
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 static _Atomic(sigaction_fn) genuine_sigaction;
 /* dlvsym is declared leaf by glibc. Volatile also keeps the guard observable

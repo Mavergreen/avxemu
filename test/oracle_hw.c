@@ -1,3 +1,4 @@
+#include "asm.h"
 #include "vexops.h"
 #include "softfma.h"
 #include <immintrin.h>
@@ -12,7 +13,7 @@
 #define ST(R) _mm256_storeu_si256((__m256i*)out->b,(R))
 
 /* ground truth for non-immediate ops. operand slots match vec_exec(). */
-int oracle_hw_simple(vex_op op, const ymm256*a,const ymm256*b,const ymm256*c,ymm256*out,uint64_t*gpr){
+AVXEMU_RAW_ATTR int oracle_hw_simple(vex_op op, const ymm256*a,const ymm256*b,const ymm256*c,ymm256*out,uint64_t*gpr){
     __m256i r;
     switch(op){
     case VPADDB:r=_mm256_add_epi8(LA,LB);break; case VPADDW:r=_mm256_add_epi16(LA,LB);break;
@@ -87,7 +88,7 @@ int oracle_hw_simple(vex_op op, const ymm256*a,const ymm256*b,const ymm256*c,ymm
     case 15: R = FN(15); break; case 16: R = FN(16); break; case 31: R = FN(31); break; \
     default: R = FN(0); break; }
 
-void oracle_hw_imm(int idx, uint8_t imm, const ymm256 *a, const ymm256 *b, ymm256 *out) {
+AVXEMU_RAW_ATTR void oracle_hw_imm(int idx, uint8_t imm, const ymm256 *a, const ymm256 *b, ymm256 *out) {
     __m256i A = _mm256_loadu_si256((const __m256i *)a->b);
     __m256i B = _mm256_loadu_si256((const __m256i *)b->b);
     __m256i R = _mm256_setzero_si256();
@@ -140,7 +141,7 @@ void oracle_hw_imm(int idx, uint8_t imm, const ymm256 *a, const ymm256 *b, ymm25
     _mm256_storeu_si256((__m256i *)out->b, R);
 }
 
-double oracle_hw_fma_d(int variant, double m1, double m2, double ad) {
+AVXEMU_RAW_ATTR double oracle_hw_fma_d(int variant, double m1, double m2, double ad) {
     __m128d x = _mm_set_sd(m1), y = _mm_set_sd(m2), z = _mm_set_sd(ad), r;
     switch (variant) {
     case 0: r = _mm_fmadd_sd(x, y, z); break;  case 1: r = _mm_fmsub_sd(x, y, z); break;
@@ -149,7 +150,7 @@ double oracle_hw_fma_d(int variant, double m1, double m2, double ad) {
     return _mm_cvtsd_f64(r);
 }
 
-float oracle_hw_fma_f(int variant, float m1, float m2, float ad) {
+AVXEMU_RAW_ATTR float oracle_hw_fma_f(int variant, float m1, float m2, float ad) {
     __m128 x = _mm_set_ss(m1), y = _mm_set_ss(m2), z = _mm_set_ss(ad), r;
     switch (variant) {
     case 0: r = _mm_fmadd_ss(x, y, z); break;  case 1: r = _mm_fmsub_ss(x, y, z); break;

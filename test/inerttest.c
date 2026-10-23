@@ -24,9 +24,17 @@
 #include "cpu.h"
 
 /* A cpuid in our own __text, where avxemu's cpuid pass would rewrite it. */
+#ifdef __APPLE__
 __asm__(".text\n.globl _probe_cpuid\n_probe_cpuid:\n cpuid\n ret\n");
+#else
+__asm__(".text\n.globl probe_cpuid\n.type probe_cpuid,@function\nprobe_cpuid:\n cpuid\n ret\n.size probe_cpuid,.-probe_cpuid\n");
+#endif
 extern const uint8_t probe_cpuid[];
+#ifdef __APPLE__
 extern int avxemu_rebind_count;
+#else
+static const int avxemu_rebind_count;
+#endif
 #include "platform/loader.h"
 
 int main(void) {

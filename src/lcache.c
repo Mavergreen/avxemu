@@ -77,7 +77,7 @@ static void say(const char *what) {
     char b[1300];
     int n = snprintf(b, sizeof b, "avxemu cache: %s (%u cpuid, %u bytes, %u runs) %s\n",
                      what, g_ncpuid, g_nbytes, g_nruns, g_path);
-    if (n > 0) (void)write(2, b, (size_t)n);
+    if (n > 0) (void)!write(2, b, (size_t)n);
 }
 
 static int settings_that_do_not_matter(const char *e) {
@@ -101,6 +101,13 @@ static int make_key(const avxemu_image *image) {
             (i && image->ranges[i - 1].vaddr + image->ranges[i - 1].size > r->vaddr)) return 0;
         h = fnv64(h, &r->vaddr, sizeof r->vaddr);
         h = fnv64(h, &size, sizeof size);
+    }
+    if(!avxemu_image_data_valid(image)) return 0;
+    count=image->strategy; h=fnv64(h,&count,sizeof count);
+    count=image->ndata; h=fnv64(h,&count,sizeof count);
+    for(size_t i=0;i<image->ndata;i++) {
+        uint64_t bounds[4]={image->data[i].range,image->data[i].begin,image->data[i].end,image->data[i].kind};
+        h=fnv64(h,bounds,sizeof bounds);
     }
     g_key.layout_hash = h;
     uint32_t r[4] = {0};
@@ -157,6 +164,8 @@ uint8_t *avxemu_lc_resolve(const avxemu_image *image, lc_site site, size_t need)
     const avxemu_code_range *r = &image->ranges[site.range];
     if (site.off > r->size || need > r->size - site.off || r->readable < r->size ||
         r->size > UINTPTR_MAX - (uintptr_t)r->base) return 0;
+    if(avxemu_image_data_overlap(image,site.range,(size_t)site.off,
+        need?need:(site.off<r->size?1:0))) return 0;
     uint8_t *p = r->base + (size_t)site.off;
     uint32_t range; size_t off;
     if (need && (!avxemu_image_find(image, (uintptr_t)p, need, &range, &off) ||
@@ -187,6 +196,8 @@ static int records_valid(const avxemu_image *image) {
         if (r->reserved || !r->n || !avxemu_lc_resolve(image, r->site, 5) ||
             !avxemu_lc_resolve(image, r->resume, 0) || r->site.range != r->resume.range ||
             r->resume.off < r->site.off || r->resume.off - r->site.off < 5 ||
+            avxemu_image_data_overlap(image,r->site.range,(size_t)r->site.off,
+                (size_t)(r->resume.off-r->site.off)) ||
             (i && (!ordered(g_runs[i - 1].site, r->site) ||
                    (g_runs[i - 1].site.range == r->site.range &&
                     g_runs[i - 1].resume.off > r->site.off)))) return 0;

@@ -41,7 +41,9 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #include "lcache.h"
 #include "image.h"
 #include "cpu.h"
@@ -188,8 +190,14 @@ static void wrong_old_byte(uint8_t *b, size_t n) {
 int main(void) {
     if (getenv("CACHETEST_CHILD")) return child();
     if (!getenv("AVXEMU_NOCACHE")) { printf("run as: AVXEMU_NOCACHE=1 cachetest\n"); return 2; }
+#ifdef __APPLE__
     uint32_t sz = sizeof g_self;
     if (_NSGetExecutablePath(g_self, &sz)) return 2;
+#else
+    ssize_t len = readlink("/proc/self/exe", g_self, sizeof g_self - 1);
+    if (len < 0 || (size_t)len >= sizeof g_self - 1) return 2;
+    g_self[len] = 0;
+#endif
     snprintf(g_dir, sizeof g_dir, "/tmp/avxemu-cachetest.%d", (int)getpid());
     mkdir(g_dir, 0700);
 
@@ -216,7 +224,12 @@ int main(void) {
     expect(a.base != b.base && !strcmp(b.stat, "hit"), "replay uses a different actual ASLR load address");
     expect(a.ok && b.ok, "patched cpuid, lzcnt and AVX2 run compute correctly");
     cache_file(path, sizeof path);
-    lc_hdr h; int fd = open(path, O_RDONLY); read(fd, &h, sizeof h); close(fd);
+    lc_hdr h; int fd = open(path, O_RDONLY);
+    if (fd < 0 || read(fd, &h, sizeof h) != sizeof h) {
+        if (fd >= 0) close(fd);
+        fprintf(stderr, "cachetest: cannot read recorded header\n"); return 2;
+    }
+    close(fd);
     /* capable means forced from here on: FORCEPATCH runs the lzcnt pass, FORCETRAMP
      * makes every emulatable op fault for the trampoline pass. */
     int lz_pass = capable || !(feats & CPU_LZCNT);
@@ -256,7 +269,7 @@ int main(void) {
     DIR *cache = opendir(g_dir); struct dirent *entry;
     if (cache) {
         while ((entry = readdir(cache))) {
-            char other[700];
+            char other[sizeof g_dir + sizeof entry->d_name + 1];
             snprintf(other, sizeof other, "%s/%s", g_dir, entry->d_name);
             if (strstr(entry->d_name, ".avxc") && strcmp(other, path)) unlink(other);
         }
@@ -285,7 +298,8 @@ int main(void) {
     run(&c);
     expect(all && cache_file(path, sizeof path) == 1 && !strcmp(c.stat, "hit"), "8 simultaneous cold starts: all correct, one good cache");
 
-    char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir); system(cmd);
+    char cmd[600]; snprintf(cmd, sizeof cmd, "rm -rf '%s'", g_dir);
+    expect(system(cmd) == 0, "remove test cache");
     printf("\nCACHETEST TOTAL: %d failure(s)\n", nfail);
     return nfail ? 1 : 0;
 }

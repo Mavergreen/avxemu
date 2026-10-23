@@ -44,7 +44,7 @@ void *avxemu_pool_alloc(size_t n);
 avxemu_mapping *avxemu_patch_write_begin(uintptr_t address, size_t size, size_t *count);
 void avxemu_patch_write_end(avxemu_mapping *saved, size_t count);
 
-long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required, int recursive);
+long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required);
 
 /* Window patch-safety (Part 3): is it safe to write a `jmp` of `jmplen` bytes at
  * `site`? Finds the function containing `site` (explicit image function bounds)

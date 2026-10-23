@@ -40,7 +40,7 @@ int main(void) {
         {second, 0x4000, 64, 64, AVXEMU_PROT_R | AVXEMU_PROT_X}
     };
     avxemu_function funcs[] = {{0, 0, sizeof island}, {1, 0, sizeof real}, {1, 32, 40}};
-    avxemu_image image = {ranges, 2, funcs, 3, 0};
+    avxemu_image image = {ranges, 2, funcs, 3, 0, 0, 0, AVXEMU_SCAN_STRICT};
     assert(!mprotect(mem, page * 4, PROT_READ | PROT_EXEC));
     assert(((int (*)(void))mem)() == 42);
     size_t sites[4];
@@ -67,9 +67,9 @@ int main(void) {
     static const uint8_t genuine_ud2[] = {0x0f, 0x0b, 0xf3, 0x0f, 0xbd, 0xc0, 0xc3};
     assert(lde_scan_sites(genuine_ud2, 0, sizeof genuine_ud2, sizeof genuine_ud2,
                            LDE_LZCNT, 1, sites, 4, avxemu_cpuid_trap) == 0);
-    assert(avxemu_patch_zcnt_image(&image, 1, 1) == 1);
+    assert(avxemu_patch_zcnt_image(&image, 1) == 1);
     assert(second[2] == 0xf0 && second[6] == 0xf3);
-    assert(avxemu_patch_zcnt_image(&image, 2, 1) == 1);
+    assert(avxemu_patch_zcnt_image(&image, 2) == 1);
     assert(second[6] == 0xf0);
     assert(!memcmp(mem, island, sizeof island));
     assert(((int (*)(void))mem)() == 42);
@@ -135,7 +135,7 @@ int main(void) {
     avxemu_code_range br = {broken, 0, sizeof truncated, sizeof truncated,
                             AVXEMU_PROT_R | AVXEMU_PROT_X};
     avxemu_function bf = {0, 0, sizeof truncated};
-    avxemu_image bi = {&br, 1, &bf, 1, 0};
+    avxemu_image bi = {&br, 1, &bf, 1, 0, 0, 0, AVXEMU_SCAN_STRICT};
     assert(avxemu_cpuid_patch_image(&bi, 0) == 0);
     assert(!memcmp(broken, truncated, sizeof truncated));
     assert(!avxemu_cpuid_trap((uintptr_t)broken));
@@ -148,7 +148,7 @@ int main(void) {
     huge[huge_size - 1] = 0xc3;
     avxemu_code_range hr = {huge, 0, huge_size, huge_size, AVXEMU_PROT_R | AVXEMU_PROT_X};
     avxemu_function hf = {0, 0, huge_size};
-    avxemu_image hi = {&hr, 1, &hf, 1, 0};
+    avxemu_image hi = {&hr, 1, &hf, 1, 0, 0, 0, AVXEMU_SCAN_STRICT};
     assert(avxemu_cpuid_patch_image(&hi, 1) == 0);
     for (size_t i = 0; i + 1 < huge_size; i += 2) assert(huge[i] == 0x0f && huge[i + 1] == 0xa2);
     /* A custom executable section can still belong to an ELF executable
@@ -157,9 +157,22 @@ int main(void) {
     uint8_t helper_before[32]; memcpy(helper_before, helper, sizeof helper_before);
     avxemu_code_range rr = {helper, 0, 32, 32, AVXEMU_PROT_R | AVXEMU_PROT_X};
     avxemu_function ff = {0, 0, 32};
-    avxemu_image raw_image = {&rr, 1, &ff, 1, 0};
+    avxemu_image raw_image = {&rr, 1, &ff, 1, 0, 0, 0, AVXEMU_SCAN_STRICT};
     assert(avxemu_cpuid_patch_image(&raw_image, 1) == 0);
     assert(!memcmp(helper_before, helper, sizeof helper_before));
+    uint8_t declared[]={0x0f,0xa2,0xc3,0x90,0x0f,0xa2,0xf3,0x0f,0xbc,0xc0,0xc3};
+    memcpy(second,declared,sizeof declared);
+    avxemu_code_range dr={second,0,sizeof declared,sizeof declared,AVXEMU_PROT_R|AVXEMU_PROT_X};
+    avxemu_function df={0,0,sizeof declared}; avxemu_data_span dd={0,4,sizeof declared,0};
+    avxemu_image di={&dr,1,&df,1,0,&dd,1, AVXEMU_SCAN_STRICT};
+    assert(avxemu_cpuid_patch_image(&di,0)==1);
+    assert(second[1]==0x0b && !memcmp(second+4,declared+4,sizeof declared-4));
+    assert(avxemu_patch_zcnt_image(&di,LDE_TZCNT)==0);
+    assert(!memcmp(second+4,declared+4,sizeof declared-4));
+    avxemu_patch_safe_test_image(&di);
+    assert(!avxemu_patch_safe(second+2,5));
+    assert(avxemu_patch_limit(second)==second+4);
+    assert(!avxemu_patch_limit(second+4));
     assert(avxemu_pool_init(0, 1u << 20));
     decoded d;
     assert(decode(real + 2, &d) == 4);

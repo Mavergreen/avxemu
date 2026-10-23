@@ -18,6 +18,13 @@
  * sigaction *code* is untouched, though — we find its address by reading
  * libsystem_c.dylib's own symbol table (n_value + slide), immune to interpose.
  */
+/* Darwin's software-source constants are positive; Linux's sign rule does
+ * not apply. Keep the platform's named classifications here. */
+int avxemu_signal_generated(const siginfo_t *info) {
+    return info && (info->si_code==SI_USER || info->si_code==SI_QUEUE ||
+        info->si_code==SI_TIMER || info->si_code==SI_ASYNCIO || info->si_code==SI_MESGQ);
+}
+
 typedef int (*sigaction_fn)(int, const struct sigaction *, struct sigaction *);
 
 static void *real_sym(const char *img, const char *name){

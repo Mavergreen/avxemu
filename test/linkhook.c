@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 /*
  * linkhook.c — avxemu must keep SIGILL even when it is LINKED, not inserted.
  *
@@ -24,7 +27,11 @@
 #include <signal.h>
 #include <dlfcn.h>
 
+#ifdef __APPLE__
 extern int avxemu_rebind_count;
+#else
+static const int avxemu_rebind_count;
+#endif
 #include "platform/loader.h"
 
 static void my_handler(int sig, siginfo_t *si, void *uc) {

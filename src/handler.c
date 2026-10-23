@@ -91,16 +91,16 @@ static int faulthist_enabled(void){
 }
 static void fh_u64(int fd, uint64_t v){
     char b[24]; int i = 24;
-    if (v == 0){ (void)write(fd, "0", 1); return; }
+    if (v == 0){ (void)!write(fd, "0", 1); return; }
     while (v){ b[--i] = (char)('0' + (v % 10)); v /= 10; }
-    (void)write(fd, b + i, (size_t)(24 - i));
+    (void)!write(fd, b + i, (size_t)(24 - i));
 }
 static void fh_hex(int fd, uint64_t v){
     char b[18]; int i = 18;
-    if (v == 0){ (void)write(fd, "0x0", 3); return; }
+    if (v == 0){ (void)!write(fd, "0x0", 3); return; }
     while (v){ int d = (int)(v & 0xF); b[--i] = (char)(d < 10 ? '0' + d : 'a' + d - 10); v >>= 4; }
     b[--i] = 'x'; b[--i] = '0';
-    (void)write(fd, b + i, (size_t)(18 - i));
+    (void)!write(fd, b + i, (size_t)(18 - i));
 }
 /* AVXEMU_FAULTSNAP: register+string snapshot from inside the handler. */
 static int g_faultsnap_on = -1;
@@ -113,12 +113,12 @@ static void faultsnap_dump(uint64_t rip, const avxemu_regfile *rf){
     int fd = open("/tmp/faultsnap.out", O_WRONLY | O_CREAT | O_APPEND, 0644);
     if (fd < 0) return;
     /* seq + monotonic time in the header so recurrence ACROSS the run is measurable */
-    (void)write(fd, "--- snap ", 9); fh_u64(fd, g_faultsnap_total);
-    (void)write(fd, " t ", 3); fh_u64(fd, avxemu_host_ticks());
-    (void)write(fd, " rip ", 5); fh_hex(fd, rip); (void)write(fd, "\n", 1);
+    (void)!write(fd, "--- snap ", 9); fh_u64(fd, g_faultsnap_total);
+    (void)!write(fd, " t ", 3); fh_u64(fd, avxemu_host_ticks());
+    (void)!write(fd, " rip ", 5); fh_hex(fd, rip); (void)!write(fd, "\n", 1);
     for (int i = 0; i < 16; i++){
         uint64_t v = rf->gpr[i];
-        (void)write(fd, "r", 1); fh_u64(fd, (uint64_t)i); (void)write(fd, "=", 1); fh_hex(fd, v);
+        (void)!write(fd, "r", 1); fh_u64(fd, (uint64_t)i); (void)!write(fd, "=", 1); fh_hex(fd, v);
         /* plausible user pointer? try a guarded read and print printable runs */
         if (v >= 0x100000000ull && v < 0x800000000000ull){
             uint8_t buf[128];
@@ -128,13 +128,13 @@ static void faultsnap_dump(uint64_t rip, const avxemu_regfile *rf){
                     int printable = k < (int)sizeof buf && buf[k] >= 0x20 && buf[k] < 0x7F;
                     if (printable) run++;
                     else {
-                        if (run >= 6){ (void)write(fd, " \"", 2); (void)write(fd, buf + k - run, (size_t)run); (void)write(fd, "\"", 1); }
+                        if (run >= 6){ (void)!write(fd, " \"", 2); (void)!write(fd, buf + k - run, (size_t)run); (void)!write(fd, "\"", 1); }
                         run = 0;
                     }
                 }
             }
         }
-        (void)write(fd, "\n", 1);
+        (void)!write(fd, "\n", 1);
     }
     close(fd);
 }
@@ -154,7 +154,7 @@ static void faulthist_dump(void){
     int fd = open("/tmp/faulthist.out.tmp", O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return;
     static const char hdr[] = "=== AVXEMU_FAULTHIST: still-faulting RIPs (count desc, top 48) ===\n";
-    (void)write(fd, hdr, sizeof hdr - 1);
+    (void)!write(fd, hdr, sizeof hdr - 1);
     /* top-48 selection over the fixed table; O(48*4096) compares, diagnostic-only */
     uint64_t seen_max = ~0ull; uint32_t seen_n = ~0u;
     for (int rank = 0; rank < 48; rank++){
@@ -165,15 +165,15 @@ static void faulthist_dump(void){
             if (n > bn || (n == bn && r > brip)){ bn = n; brip = r; }
         }
         if (!brip) break;
-        fh_hex(fd, brip); (void)write(fd, "\t", 1); fh_u64(fd, bn); (void)write(fd, "\n", 1);
+        fh_hex(fd, brip); (void)!write(fd, "\t", 1); fh_u64(fd, bn); (void)!write(fd, "\n", 1);
         seen_n = bn; seen_max = brip;
     }
-    (void)write(fd, "TOTAL_FAULTS\t", 13); fh_u64(fd, g_faulthist_total); (void)write(fd, "\n", 1);
+    (void)!write(fd, "TOTAL_FAULTS\t", 13); fh_u64(fd, g_faulthist_total); (void)!write(fd, "\n", 1);
     static const char dh[] = "=== relocation DECLINES (rip, reason: 1=pool-init 2=decode 3=not-faulting 4=window 5=patch-safety 6=pool-alloc 7=rel32 8=site-write 9=line-straddle) ===\n";
-    (void)write(fd, dh, sizeof dh - 1);
+    (void)!write(fd, dh, sizeof dh - 1);
     for (int i = 0; i < g_ndeclined; i++){
-        fh_hex(fd, g_declined[i].rip); (void)write(fd, "\tR", 2);
-        fh_u64(fd, (uint64_t)g_declined[i].reason); (void)write(fd, "\n", 1);
+        fh_hex(fd, g_declined[i].rip); (void)!write(fd, "\tR", 2);
+        fh_u64(fd, (uint64_t)g_declined[i].reason); (void)!write(fd, "\n", 1);
     }
     close(fd);
     (void)rename("/tmp/faulthist.out.tmp", "/tmp/faulthist.out");
@@ -215,10 +215,9 @@ static int site_slot(uint64_t rip) {
  */
 int avxemu_test_ud2 = 0;
 
-static void emit(const char *s){ (void)write(2, s, strlen(s)); }
+static void emit(const char *s){ (void)!write(2, s, strlen(s)); }
 
 extern void avxemu_selftest(void);   /* selftest.c */
-extern long avxemu_patch_lzcnt(void);/* patch_mem.c */
 extern long avxemu_install_trampolines(void); /* tramp.c */
 
 /* ---- crash handler state (for the SIMD over-read fixup) ---- */
@@ -261,8 +260,14 @@ static int install_owned(int sig, const struct sigaction *app) {
     struct sigaction sa;
     memset(&sa,0,sizeof sa);
     sa.sa_sigaction = sig==SIGILL ? on_sigill : on_crash;
-    sa.sa_mask = app->sa_mask;
-    sa.sa_flags = SA_SIGINFO | (app->sa_flags & (SA_RESTART|SA_NODEFER|SA_ONSTACK));
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    /* An inactive disposition can retain masks/flags across exec. They do not
+     * describe a callback and must not block faults raised by our emulator. */
+    if (app->sa_handler!=SIG_DFL && app->sa_handler!=SIG_IGN) {
+        sa.sa_mask = app->sa_mask;
+        sa.sa_flags |= app->sa_flags & (SA_RESTART|SA_NODEFER|SA_ONSTACK);
+    }
     if (sig!=SIGILL) sa.sa_flags |= SA_ONSTACK;
     return avxemu_real_sigaction(sig,&sa,0);
 }
@@ -355,6 +360,7 @@ static int policy_owned(int sig) {
 static int policy_take(int sig) {
     sigset_t saved; policy_enter(&saved);
     policy_slot *slot=policy_for(sig);
+    if(!slot) { policy_leave(&saved); errno=EINVAL; return -1; }
     if(policy_current(slot).owned) { policy_leave(&saved); return 0; }
     struct sigaction app;
     int result=avxemu_real_sigaction(sig,0,&app);
@@ -428,7 +434,7 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
     avxemu_regfile rf;
     /* User-generated signals belong to the application, regardless of which
      * instruction happens to be interrupted. */
-    if (info && (info->si_code == SI_USER || info->si_code == SI_QUEUE)) {
+    if (avxemu_signal_generated(info)) {
         chain(sig, info, uctx); return;
     }
     if (!avxemu_context_read(uctx, &rf, 0)) { chain(sig, info, uctx); return; }
@@ -539,7 +545,22 @@ static void on_sigill(int sig, siginfo_t *info, void *uctx) {
      * from the trampoline path, so there is exactly one emulation code path. */
     rf.rip = base;
 
-    if (!avxemu_emulate(&d, &rf)) { chain(sig, info, uctx); return; }
+    /* Application callback masks apply to chaining, not to an instruction we
+     * recognize. Only remove BUS/SEGV blocking added by this SIGILL delivery;
+     * signals already blocked by the interrupted caller stay blocked. */
+    sigset_t operand_unblock, handler_mask;
+    sigemptyset(&operand_unblock);
+    int bus_blocked=avxemu_context_signal_blocked(uctx,SIGBUS);
+    int segv_blocked=avxemu_context_signal_blocked(uctx,SIGSEGV);
+    if (bus_blocked<0 || segv_blocked<0) { chain(sig,info,uctx); return; }
+    if (!bus_blocked) sigaddset(&operand_unblock,SIGBUS);
+    if (!segv_blocked) sigaddset(&operand_unblock,SIGSEGV);
+    if (pthread_sigmask(SIG_UNBLOCK,&operand_unblock,&handler_mask)) {
+        chain(sig,info,uctx); return;
+    }
+    int emulated=avxemu_emulate(&d,&rf);
+    pthread_sigmask(SIG_SETMASK,&handler_mask,0);
+    if (!emulated) { chain(sig, info, uctx); return; }
 
     /* A prepared site resumes at its out-of-line tail: the following bytes
      * may become part of a later five-byte jump. */
@@ -621,12 +642,28 @@ static void avxemu_install(void) {
     (void)avxemu_loader_resolve();
     if (getenv("AVXEMU_DISABLE")) return;     /* opt-out escape hatch */
     if (cpu_has_everything()) return;         /* nothing to emulate: stay inert */
-    if (!avxemu_image_init()) { emit("avxemu: cannot initialize executable metadata\n"); return; }
-    if (!avxemu_page_size()) { emit("avxemu: cannot determine page size\n"); return; }
-    if (!avxemu_loader_init()) { emit("avxemu: cannot initialize loader\n"); return; }
+    if (!avxemu_cpu_baseline()) {
+        emit("avxemu: SSE4.2, AVX and OS AVX register state are required\n"); _exit(127);
+    }
+    if (!avxemu_page_size() || !avxemu_loader_init()) {
+        emit("avxemu: cannot initialize platform services\n"); _exit(127);
+    }
+    if (!avxemu_image_init()) {
+        emit("avxemu: cannot initialize executable metadata\n"); _exit(127);
+    }
+    uint32_t r7[4] = {0}, r8[4] = {0};
+    (void)avxemu_get_cpuid(7, 0, r7);
+    (void)avxemu_get_cpuid(0x80000001u, 0, r8);
+    unsigned required = avxemu_zcnt_required(r7[1], r8[2], getenv("AVXEMU_FORCEPATCH") != 0);
+    /* Read-only cache validation precedes preparation; no code edits yet. */
+    avxemu_lc_begin();
+    avxemu_zcnt_plan *zcnt_plan=avxemu_zcnt_prepare(avxemu_image_main(), required);
+    if (!zcnt_plan) {
+        emit("avxemu: unsupported executable: cannot safely discover required LZCNT/TZCNT\n"); _exit(127);
+    }
     if (policy_take(SIGILL) != 0) {
         emit("avxemu: failed to install SIGILL handler\n");
-        return;
+        _exit(127);
     }
 
     /* Fault-driven relocation is on by default; AVXEMU_RELOC=0 disables it so the
@@ -642,13 +679,13 @@ static void avxemu_install(void) {
     /* The three passes below are analysis-heavy and give the same answer every
      * launch of the same binary: replay a recording of it when there is a good
      * one, else analyse and record (lcache.c). */
-    avxemu_lc_begin();
     avxemu_patch_cpuid();
 
     /* Rewrite lzcnt/tzcnt in the main binary to a faulting form so they get
      * emulated rather than silently running as bsr/bsf on a pre-Haswell CPU.
      * No-op on CPUs that actually have LZCNT. Runs after the handler is armed. */
-    long n_lz = avxemu_patch_lzcnt();
+    long n_lz = avxemu_zcnt_apply(zcnt_plan);
+    if (n_lz < 0) { emit("avxemu: required LZCNT/TZCNT rewriting failed\n"); _exit(127); }
 
     /* Rewrite runs of faulting instructions to non-faulting trampolines so they
      * don't trap. The thunk runs its emulation on a dedicated side stack, so it

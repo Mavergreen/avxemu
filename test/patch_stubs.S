@@ -2,8 +2,8 @@
 
 // Patched-form lzcnt/tzcnt stubs. The bytes are exactly what the in-memory
 // patcher produces: the F3 prefix of a real lzcnt/tzcnt rewritten to F0 (lock),
-// which //UDs on every x86 (lock on a register-dest bsr/bsf is illegal). On the
-// AVX2 dev host that //UD traps into the production handler, which decodes the
+// which #UDs on every x86 (lock on a register-dest bsr/bsf is illegal). On the
+// AVX2 dev host that #UD traps into the production handler, which decodes the
 // F0 form (decode.c) and emulates it. Arg in %rdi, result returned in %rax.
 
 .text
