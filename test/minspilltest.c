@@ -212,10 +212,10 @@ int main(int argc, char **argv) {
                            i, (unsigned long long)v, (unsigned long long)(out_fl & F_OWNED),
                            (unsigned long long)(rf & F_OWNED)); bad = 1;
                 }
-                if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                    printf("  [lz s%d v=%016llx] PF/AF changed %03llx -> %03llx\n",
-                           i, (unsigned long long)v, (unsigned long long)(in_fl & F_PFAF),
-                           (unsigned long long)(out_fl & F_PFAF)); bad = 1;
+                if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                    printf("  [lz s%d v=%016llx] unowned flags changed %03llx -> %03llx\n",
+                           i, (unsigned long long)v, (unsigned long long)(in_fl & ~F_OWNED),
+                           (unsigned long long)(out_fl & ~F_OWNED)); bad = 1;
                 }
                 for (int j = 0; j < 16; j++) {
                     if (j == d.dst) continue;
@@ -361,10 +361,10 @@ int main(int argc, char **argv) {
                            i, (unsigned long long)v, (unsigned long long)(out_fl & F_OWNED),
                            (unsigned long long)(rf & F_OWNED)); bad = 1;
                 }
-                if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                    printf("  [tz s%d v=%016llx] PF/AF changed %03llx -> %03llx\n",
-                           i, (unsigned long long)v, (unsigned long long)(in_fl & F_PFAF),
-                           (unsigned long long)(out_fl & F_PFAF)); bad = 1;
+                if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                    printf("  [tz s%d v=%016llx] unowned flags changed %03llx -> %03llx\n",
+                           i, (unsigned long long)v, (unsigned long long)(in_fl & ~F_OWNED),
+                           (unsigned long long)(out_fl & ~F_OWNED)); bad = 1;
                 }
                 for (int j = 0; j < 16; j++) {
                     if (j == d.dst) continue;
@@ -695,10 +695,10 @@ int main(int argc, char **argv) {
                                (unsigned long long)(out_fl & F_OWNED), (unsigned long long)(rf & F_OWNED));
                         bad = 1;
                     }
-                    if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                        printf("  [bz s%d v=%016llx idx=%016llx] PF/AF changed %03llx -> %03llx\n",
+                    if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                        printf("  [bz s%d v=%016llx idx=%016llx] unowned flags changed %03llx -> %03llx\n",
                                i, (unsigned long long)in[d.a_src], (unsigned long long)in[d.b_src],
-                               (unsigned long long)(in_fl & F_PFAF), (unsigned long long)(out_fl & F_PFAF));
+                               (unsigned long long)(in_fl & ~F_OWNED), (unsigned long long)(out_fl & ~F_OWNED));
                         bad = 1;
                     }
                     for (int j = 0; j < 16; j++) {
@@ -800,10 +800,10 @@ int main(int argc, char **argv) {
                            i, (unsigned long long)v,
                            (unsigned long long)(out_fl & F_OWNED), (unsigned long long)(rf & F_OWNED)); bad = 1;
                 }
-                if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                    printf("  [blsr s%d v=%016llx] PF/AF changed %03llx -> %03llx\n",
+                if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                    printf("  [blsr s%d v=%016llx] unowned flags changed %03llx -> %03llx\n",
                            i, (unsigned long long)v,
-                           (unsigned long long)(in_fl & F_PFAF), (unsigned long long)(out_fl & F_PFAF)); bad = 1;
+                           (unsigned long long)(in_fl & ~F_OWNED), (unsigned long long)(out_fl & ~F_OWNED)); bad = 1;
                 }
                 for (int j = 0; j < 16; j++) {
                     if (j == d.dst) continue;
@@ -882,10 +882,10 @@ int main(int argc, char **argv) {
                            i, (unsigned long long)v,
                            (unsigned long long)(out_fl & F_OWNED), (unsigned long long)(rf & F_OWNED)); bad = 1;
                 }
-                if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                    printf("  [blsi s%d v=%016llx] PF/AF changed %03llx -> %03llx\n",
+                if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                    printf("  [blsi s%d v=%016llx] unowned flags changed %03llx -> %03llx\n",
                            i, (unsigned long long)v,
-                           (unsigned long long)(in_fl & F_PFAF), (unsigned long long)(out_fl & F_PFAF)); bad = 1;
+                           (unsigned long long)(in_fl & ~F_OWNED), (unsigned long long)(out_fl & ~F_OWNED)); bad = 1;
                 }
                 for (int j = 0; j < 16; j++) {
                     if (j == d.dst) continue;
@@ -966,10 +966,10 @@ int main(int argc, char **argv) {
                            i, (unsigned long long)v,
                            (unsigned long long)(out_fl & F_OWNED), (unsigned long long)(rf & F_OWNED)); bad = 1;
                 }
-                if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                    printf("  [blsm s%d v=%016llx] PF/AF changed %03llx -> %03llx\n",
+                if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                    printf("  [blsm s%d v=%016llx] unowned flags changed %03llx -> %03llx\n",
                            i, (unsigned long long)v,
-                           (unsigned long long)(in_fl & F_PFAF), (unsigned long long)(out_fl & F_PFAF)); bad = 1;
+                           (unsigned long long)(in_fl & ~F_OWNED), (unsigned long long)(out_fl & ~F_OWNED)); bad = 1;
                 }
                 for (int j = 0; j < 16; j++) {
                     if (j == d.dst) continue;
@@ -1085,10 +1085,10 @@ int main(int argc, char **argv) {
                                (unsigned long long)(out_fl & F_OWNED));
                         bad = 1;
                     }
-                    if ((out_fl & F_PFAF) != (in_fl & F_PFAF)) {
-                        printf("  [andn s%d s1=%016llx s2=%016llx] PF/AF changed %03llx -> %03llx\n",
+                    if ((out_fl & ~F_OWNED) != (in_fl & ~F_OWNED)) {
+                        printf("  [andn s%d s1=%016llx s2=%016llx] unowned flags changed %03llx -> %03llx\n",
                                i, (unsigned long long)in[d.a_src], (unsigned long long)in[d.b_src],
-                               (unsigned long long)(in_fl & F_PFAF), (unsigned long long)(out_fl & F_PFAF));
+                               (unsigned long long)(in_fl & ~F_OWNED), (unsigned long long)(out_fl & ~F_OWNED));
                         bad = 1;
                     }
                     for (int j = 0; j < 16; j++) {
