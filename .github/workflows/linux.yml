@@ -1,0 +1,46 @@
+name: Linux runtime
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+
+jobs:
+  ubuntu22:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/linux-runtime
+        with:
+          artifact-name: linux-ubuntu22.04-${{ matrix.compiler }}
+
+  ubuntu24:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc, clang]
+    env:
+      CC: ${{ matrix.compiler }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/linux-runtime
+        with:
+          artifact-name: linux-ubuntu24.04-${{ matrix.compiler }}
