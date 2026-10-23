@@ -9,14 +9,7 @@ endif()
 project(AVXEmu LANGUAGES C ASM)
 
 find_package(MavericksShipyard REQUIRED)
-include(Mavericks)
-include(MavericksMode)
-include(MavericksCompatGuard)
-mavericks_build_mode(MAVERICKS_MODE)
-mavericks_require_expected_mode("${MAVERICKS_MODE}")
-message(STATUS "AVXEmu ${AVXEMU_VERSION}: build mode ${MAVERICKS_MODE}")
-
-option(AVXEMU_BUILD_UPDATER "Build the Sparkle updater (needs avxemu in the installed shipyard's product registry)" OFF)
+option(AVXEMU_BACKEND_TESTS_ONLY "Build isolated Linux backend contracts without the runtime" OFF)
 
 # The emulator's runtime is SSE4.2-only, so it runs on the CPUs it exists for; the flags and
 # the source order are build.sh's, which is what lets this build reproduce the CDN's objects.
@@ -28,6 +21,43 @@ function(avxemu_objects name)
   target_compile_options(${name} PRIVATE "$<$<COMPILE_LANGUAGE:C>:${AVXEMU_CORE_FLAGS}>")
   target_include_directories(${name} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 endfunction()
+
+if(AVXEMU_BACKEND_TESTS_ONLY)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    message(FATAL_ERROR "Backend-only contracts require x86-64 Linux")
+  endif()
+  enable_testing()
+  find_package(Threads REQUIRED)
+  avxemu_objects(avxemu_linux_memory src/platform/linux/memory.c)
+  avxemu_objects(avxemu_linux_host src/platform/linux/host.c)
+  add_executable(memory-contract test/memory_contract.c $<TARGET_OBJECTS:avxemu_linux_memory>)
+  target_link_libraries(memory-contract PRIVATE Threads::Threads)
+  add_executable(linux-memory-faults test/linux_memory_faults.c $<TARGET_OBJECTS:avxemu_linux_memory>)
+  target_link_options(linux-memory-faults PRIVATE
+    -Wl,--wrap=open -Wl,--wrap=read -Wl,--wrap=mmap -Wl,--wrap=munmap -Wl,--wrap=syscall)
+  add_executable(linux-host-contract test/linux_host_contract.c $<TARGET_OBJECTS:avxemu_linux_host>)
+  foreach(contract memory-contract linux-memory-faults linux-host-contract)
+    target_compile_options(${contract} PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra)
+    target_include_directories(${contract} PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    add_test(NAME ${contract} COMMAND $<TARGET_FILE:${contract}>)
+    set_tests_properties(${contract} PROPERTIES LABELS hermetic TIMEOUT 60)
+  endforeach()
+  target_compile_options(avxemu_linux_memory PRIVATE -Wextra)
+  target_compile_options(avxemu_linux_host PRIVATE -Wextra)
+  return()
+endif()
+
+if(NOT APPLE)
+  message(FATAL_ERROR "The runtime currently requires Darwin; use AVXEMU_BACKEND_TESTS_ONLY for isolated Linux contracts")
+endif()
+include(Mavericks)
+include(MavericksMode)
+include(MavericksCompatGuard)
+mavericks_build_mode(MAVERICKS_MODE)
+mavericks_require_expected_mode("${MAVERICKS_MODE}")
+message(STATUS "AVXEmu ${AVXEMU_VERSION}: build mode ${MAVERICKS_MODE}")
+
+option(AVXEMU_BUILD_UPDATER "Build the Sparkle updater (needs avxemu in the installed shipyard's product registry)" OFF)
 
 avxemu_objects(avxemu_core
   src/exec.c src/exec_bmi.c src/softfma.c src/names.c src/decode.c

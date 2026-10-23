@@ -49,6 +49,8 @@ avxemu_test_exe(cache-ranges SOURCES cache_ranges.c
 add_test(NAME cache-ranges COMMAND $<TARGET_FILE:cache-ranges>)
 
 avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
+find_package(Threads REQUIRED)
+target_link_libraries(memory-contract PRIVATE Threads::Threads)
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
 avxemu_test_exe(context-contract SOURCES context_contract.c context_contract.S LINK avxemu_core avxemu_asm)
