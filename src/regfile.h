@@ -10,7 +10,7 @@
  * A flat snapshot of the machine state the emulator needs. Both entry points
  * fill one and hand it to avxemu_emulate():
  *   - the SIGILL handler copies it out of the signal's AVX mcontext;
- *   - the trampoline saver (tramp.s) spills the live registers into it.
+ *   - the trampoline saver (tramp.S) spills the live registers into it.
  * ymm is contiguous 32-byte (low xmm + high half), gpr is x86 register order
  * (0=rax,1=rcx,2=rdx,3=rbx,4=rsp,5=rbp,6=rsi,7=rdi,8..15=r8..r15).
  */

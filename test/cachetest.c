@@ -2,7 +2,7 @@
  * cachetest.c — avxemu's load-time analysis cache (lcache.c).
  *
  * avxemu is linked INTO this program, so its load-time passes act on our own
- * __text: a cpuid, an lzcnt and a trampolinable AVX2 run (cachetest.s). A driver
+ * __text: a cpuid, an lzcnt and a trampolinable AVX2 run (cachetest.S). A driver
  * runs fresh copies of us against a private cache directory; each child reports
  * a fingerprint of its logical code edits, the code pool it used, and whether the
  * patched code computes correctly. The driver checks:

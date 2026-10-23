@@ -6,7 +6,7 @@
  * threads run the same hot loops in lockstep, so each loop's relocation lands
  * while the others are executing it, faulting on it, or sitting just past it.
  *
- * The loop body (threadtest.s) is copied NFUNCS times into an r-x buffer
+ * The loop body (threadtest.S) is copied NFUNCS times into an r-x buffer
  * near the pool and registered as the patch-safety layout, the same way
  * reloctest does it. Each trial is a fresh fork, so each one relocates every
  * site again from scratch. A trial fails if a thread computes the wrong answer

@@ -2,7 +2,7 @@
  * tramptest.c — validate the trampoline thunk in isolation.
  *
  * Builds a thunk for a run of instructions, drives it through a full known
- * machine state (tramp_harness.s), and checks: (1) the destination register(s)
+ * machine state (tramp_harness.S), and checks: (1) the destination register(s)
  * get the emulated result, and (2) EVERY other register, all of ymm, and rflags
  * are preserved bit-for-bit. This exercises the save/spill/dispatch/reload/jump
  * path that the eager patcher will rely on.

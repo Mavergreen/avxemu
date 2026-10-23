@@ -90,7 +90,7 @@ constructor returns at once, and avxemu stays inert. Anywhere else it arms four 
    `__text`, guided by `LC_FUNCTION_STARTS`. It rewrites each run of faulting instructions into
    a 5-byte `jmp` to a generated thunk. The thunk saves the registers, emulates on a per-thread
    side stack, restores them and jumps back. About 97% of faulting sites never trap.
-   Jump-table functions are mapped by recursive descent. (`src/tramp.c`, `src/tramp.s`,
+   Jump-table functions are mapped by recursive descent. (`src/tramp.c`, `src/tramp.S`,
    `src/lde.c`)
 2. **The `SIGILL` handler, the fallback.** It covers sites too small or too close to a branch
    target for a 5-byte jump. It decodes at `rip`, reads the real `ymm` registers from the AVX
@@ -199,10 +199,10 @@ Only a native build without AVX2 beats this.
 |---|---|
 | `decode.c`, `lde.c` | instruction decoder; length decoder and recursive-descent scanner |
 | `exec.c`, `exec_bmi.c`, `softfma.c` | the SSE-only emulator core |
-| `tramp.c`, `tramp.s`, `reloc.c` | trampoline scanner, installer and thunk template; runtime relocation of trapping sites |
+| `tramp.c`, `tramp.S`, `reloc.c` | trampoline scanner, installer and thunk template; runtime relocation of trapping sites |
 | `lcache.c` | the load-time cache: records the load-time passes' result, replays it |
 | `handler.c`, `patch_mem.c` | the constructor, signal handlers, lzcnt/tzcnt patcher |
-| `selftest.c`, `selftest.s` | `AVXEMU_SELFTEST` |
+| `selftest.c`, `selftest.S` | `AVXEMU_SELFTEST` |
 
 The headers `ymm.h`, `regs.h`, `regfile.h` and `vexops.h` define the 256-bit value, the CPU
 state the emulator touches, the register file both paths fill, and the opcode enum. `names.c`

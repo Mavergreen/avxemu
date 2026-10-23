@@ -3,7 +3,7 @@
  *
  * A minimal-spill thunk operates on the live program registers in place (saving
  * only the scratch its lowering borrows), entered by a `jmp` and ending in a
- * `jmp resume`. minspill_harness.s loads a known live GPR/flags state, jumps the
+ * `jmp resume`. minspill_harness.S loads a known live GPR/flags state, jumps the
  * thunk, and at a fixed global resume label captures the resulting live state.
  *
  * This file starts with a NO-OP thunk (just `jmp resume`) to validate the harness

@@ -1,7 +1,7 @@
 /*
  * inject.c — end-to-end validation on an AVX2 host.
  *
- *  (1) Decoder: read the real encodings in stubs.s, decode each, and check the
+ *  (1) Decoder: read the real encodings in stubs.S, decode each, and check the
  *      op id and length (length must equal the assembler's actual encoding).
  *  (2) Fault injection: call e2e_* stubs whose `ud2` traps into the real signal
  *      handler (test mode), which decodes + emulates the following instruction

@@ -1,3 +1,5 @@
+#include "asm.h"
+
 // Harness for the native-vs-emulated fuzzer.
 //
 // _fuzz(state*): load ymm0..15 from state[0..512), execute the patched slot,
@@ -7,8 +9,8 @@
 // into the slot. The slot is empty here; the fuzzer fills it at runtime.
 
 .text
-.globl _fuzz_start
-_fuzz_start:
+.globl AVXEMU_SYM(fuzz_start)
+AVXEMU_SYM(fuzz_start):
     pushq %r15
     movq  %rdi, %r15
     vmovdqu   0(%r15), %ymm0
@@ -27,11 +29,11 @@ _fuzz_start:
     vmovdqu 416(%r15), %ymm13
     vmovdqu 448(%r15), %ymm14
     vmovdqu 480(%r15), %ymm15
-.globl _fuzz_slot
-_fuzz_slot:
+.globl AVXEMU_SYM(fuzz_slot)
+AVXEMU_SYM(fuzz_slot):
     // runtime patches [ud2?]+instruction+nop padding here (fixed-size slot)
-.globl _fuzz_epilogue
-_fuzz_epilogue:
+.globl AVXEMU_SYM(fuzz_epilogue)
+AVXEMU_SYM(fuzz_epilogue):
     vmovdqu %ymm0,  512(%r15)
     vmovdqu %ymm1,  544(%r15)
     vmovdqu %ymm2,  576(%r15)
@@ -51,5 +53,7 @@ _fuzz_epilogue:
     popq %r15
     vzeroupper
     retq
-.globl _fuzz_end
-_fuzz_end:
+.globl AVXEMU_SYM(fuzz_end)
+AVXEMU_SYM(fuzz_end):
+
+AVXEMU_GNU_STACK
