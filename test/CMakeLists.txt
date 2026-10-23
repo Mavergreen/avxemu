@@ -345,6 +345,19 @@ avxemu_test_exe(threadtest FLAGS -O2 -std=c11 SOURCES threadtest.c threadtest.S 
 target_link_libraries(threadtest PRIVATE avxemu)
 add_test(NAME threadtest COMMAND $<TARGET_FILE:threadtest> 20 12)
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(lowcpu lowcpu.c lowcpu.S)
+  target_compile_options(lowcpu PRIVATE ${AVXEMU_CORE_FLAGS} -Wextra -UNDEBUG)
+  target_include_directories(lowcpu PRIVATE "${PROJECT_SOURCE_DIR}/src")
+  target_link_libraries(lowcpu PRIVATE Threads::Threads)
+  add_custom_command(TARGET lowcpu POST_BUILD COMMAND "${CMAKE_STRIP}" --strip-all
+    -o "$<TARGET_FILE:lowcpu>-stripped" "$<TARGET_FILE:lowcpu>" VERBATIM)
+  option(AVXEMU_TEST_LOWCPU "Require full-system QEMU reduced-CPU validation (see test/lowcpu.sh)" OFF)
+  if(AVXEMU_TEST_LOWCPU)
+    add_test(NAME lowcpu COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/lowcpu.sh" "${CMAKE_BINARY_DIR}")
+    set_tests_properties(lowcpu PROPERTIES LABELS lowcpu TIMEOUT 900)
+  endif()
+endif()
 
 avxemu_test_exe(overread_fault FLAGS -O0 SOURCES overread_fault.c)
 set(ROSETTA_OVERREAD "under Rosetta avxemu's fault handler does not repair and retry the read that straddles an unmapped page, and the test segfaults; it passes natively on 10.9 and on Intel with AVX2; the cause is not yet diagnosed")
