@@ -17,7 +17,28 @@ repo's own recipe.
 
 The display name is **AVXEmu** in every register (package title, appcast channel, updater,
 release notes), without the family's "Mavericks" / "for Mavericks" wording, because the
-product is meant to run beyond Mac OS X 10.9: a Linux build is a planned follow-up.
+product runs beyond Mac OS X 10.9: Linux users build `libavxemu.so` from source. Linux CI
+gates the existing macOS release; it does not create a Linux package asset.
+
+## Linux build and test tools
+
+The Linux runtime links the target's glibc, libdl, libm and pthread facilities. GCC/Clang,
+GNU binutils and CMake >=3.25 are build tools; the Shipyard CMake package remains required.
+Ubuntu 22.04 and 24.04 CI install compiler/system development packages from their configured
+Ubuntu repositories. These tool versions follow the runner distribution and are logged.
+
+`test/prepare-linux-ci.sh` owns checksum-pinned test dependencies: QEMU 11.1.2 source plus
+the exact `test/qemu-count-features.patch` correction, Ubuntu kernel
+`6.14.0-37.37~24.04.1`, and fallback Kitware CMake 3.28.3. Static BusyBox, cpio and gzip
+construct a full-system initramfs using each runner's own glibc/test binaries. QEMU's pinned
+source declares its Python and DTC build dependencies. See DEVELOPING.md, "Linux CI
+dependencies", for checksums, preparation and the pristine-QEMU limitation.
+
+These pins are deliberately not Renovate-tracked: they are behavioral validation fixtures,
+not ingredients baked into the shipped library/package; changing them requires repeating
+the independent instruction controls and full reduced-CPU matrix. No additional
+`repackage-on-ingredient-bump` caller is warranted for test tools. There are no product
+ingredient pin files here requiring that caller; Shipyard owns SDK/Sparkle pins and updates.
 
 ## Declared state
 
@@ -25,6 +46,7 @@ product is meant to run beyond Mac OS X 10.9: a Linux build is a planned follow-
 
 ## Conformance deviations
 
+- shipyard-cmake-only:test/prepare-linux-ci.sh: Ubuntu-only CI provisioning checks CMake's version before configuration and installs a verified fallback when needed; Shipyard provides no Linux shipyard-cmake executable. The helper rejects other hosts; macOS retains Shipyard's commands.
 - scheme: AVXEmu is its own upstream (no one else's release to repackage), so it versions itself by date as YYYYMMDD.N with no -mavericks.N axis
 - rosetta:.github/workflows/release.yml: the release job runs on an Apple Silicon (arm64) runner and primes Rosetta ("Ensure this runner can run x86_64 (Rosetta)") so ctest can execute the shipped x86_64 libavxemu.dylib, and the x86_64 test programs that load it (the hermetic and replay labels), before they ship. It cannot run natively: AVXEmu emulates x86 instructions, so the product under test is x86_64 by nature. The hardware label deliberately does not run translated: Rosetta is not ground truth for AVX2/FMA/BMI, and record mode refuses to run under it. Reconsider when these tests can move to an x86_64 host (the 10.9 box, an Intel runner, or the Mavericks VM runner the family is bringing to GitHub Actions); at the latest before macOS 28 removes Rosetta.
 - rosetta:test/CMakeLists.txt: the `overread-fault` and `cachetest` tests run translated in CI, on the arm64 runner, as declared known failures (`--fails-when rosetta`): under Rosetta avxemu's fault handler does not repair and retry the read that straddles an unmapped page, so overread-fault segfaults; and cachetest's three checks that compare code bytes between processes (replayed `__text` and pool against the analysed ones, a re-analysis after a corrupt file, 8 simultaneous cold starts) fail while its other checks pass. Neither cause is diagnosed yet. It cannot run natively there yet: CI has only arm64 runners, and the program under test is x86_64 by nature. Native 10.9 and Intel-with-AVX2 runs pass both; only the translated CI leg is marked, and run.sh fails a test that unexpectedly passes there. Reconsider when they can move to the Mavericks VM runner the family is bringing to GitHub Actions, or to the 10.9 box, at which point the mark comes off; at the latest before macOS 28 removes Rosetta.
@@ -47,7 +69,10 @@ A packaging-only re-release of the same source (a new `.N`):
 
 ### Before bumping `UPSTREAM_VERSION`
 
-CI cross-builds and runs the `hermetic` and `replay` tests under Rosetta. Two checks need
+CI cross-builds and runs the `hermetic` and `replay` tests under Rosetta, and requires GCC
+and Clang Linux validation on Ubuntu 22.04/24.04, including hardware oracles where eligible
+and the patched-QEMU full-system AVX1 matrix. Hardware/application skips remain visible;
+the lowcpu label is mandatory and missing prerequisites fail. Two macOS checks need
 real hardware and are done by hand; the release's notes file in `release-notes/` says both
 were done.
 

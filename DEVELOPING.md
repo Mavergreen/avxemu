@@ -15,18 +15,97 @@ suite about 12 s, most of it `threadtest`.
 `shipyard-cmake` comes from [shipyard](https://github.com/Mavergreen/shipyard). The build is
 out of tree: `libavxemu.dylib` lands in `$TMPDIR/mm-build/<checkout>-<preset>/`.
 
+On x86-64 glibc Linux, use CMake 3.25 or newer, GCC or Clang, GNU binutils, and Shipyard's
+CMake package. Point `MavericksShipyard_DIR` at a Shipyard checkout or installed package
+directory containing `MavericksShipyardConfig.cmake`:
+
+```sh
+export MavericksShipyard_DIR=/absolute/path/to/shipyard
+AVXEMU_BUILD_DIR="${TMPDIR:-/tmp}/mm-build/avxemu-linux"
+cmake -S . -B "$AVXEMU_BUILD_DIR" -DMavericksShipyard_DIR="$MavericksShipyard_DIR"
+cmake --build "$AVXEMU_BUILD_DIR" -j2
+ctest --test-dir "$AVXEMU_BUILD_DIR" --output-on-failure -L 'hermetic|replay'
+ctest --test-dir "$AVXEMU_BUILD_DIR" --output-on-failure -L hardware
+cmake --install "$AVXEMU_BUILD_DIR" --prefix "$HOME/.local/avxemu"
+```
+
+This installs `lib/libavxemu.so` and documentation, license and provenance under
+`share/doc/AVXEmu` (both destinations honor GNUInstallDirs); see README for preload and direct linkage. Set `CC=clang`
+on the initial configure to select Clang. Linux builds do not use the Darwin toolchain or
+Sparkle updater. Keep build directories on local temporary storage, outside the source tree.
+
 ## Which machine runs which tests
 
 Each test carries a label for what it needs. A test whose need is unmet skips.
 
 | label | needs | runs on |
 |---|---|---|
-| `hermetic` | only the emulator, any x86_64 | everywhere, CI included (under Rosetta) |
+| `hermetic` | only the emulator, supported x86-64 CPU/OS | Darwin and Linux; macOS CI uses Rosetta |
 | `replay` | only the emulator, checked against recordings from AVX2 silicon | everywhere, CI included |
-| `hardware` | a real AVX2/FMA/BMI CPU, not Rosetta | an Intel Mac with AVX2 |
+| `hardware` | raw features required by each oracle, not Rosetta | capable x86-64 Darwin or Linux hosts |
 | `claude-binary` | `CLAUDE_BIN=<a Claude Code binary>` | wherever you set it |
+| `lowcpu` | full-system QEMU TCG, suitable kernel, static BusyBox | Linux; opt-in locally, required in CI |
 
 To run one label: `shipyard-ctest --preset native -L replay`.
+
+Linux uses `ctest --test-dir "$AVXEMU_BUILD_DIR" -L replay`. Feature-guarded hardware tests
+report CTest skips when their raw CPU requirements are absent; supplying no `CLAUDE_BIN`
+also skips application-dependent tests. The required `lowcpu` test never skips.
+
+### Linux CI dependencies
+
+The reusable Linux workflow runs GCC and Clang on literal Ubuntu 22.04 and 24.04 runners.
+`test/prepare-linux-ci.sh TOOL_DIR ENV_FILE` installs declared Ubuntu build prerequisites,
+checks CMake >=3.25 (using checksum-pinned Kitware 3.28.3 when necessary), builds QEMU, and
+extracts a checksum-pinned Ubuntu kernel into temporary storage. `ENV_FILE` receives
+`CMAKE_BIN`, `QEMU_SYSTEM_X86_64`, `LOWCPU_KERNEL`, and `LOWCPU_BUSYBOX`; add `CMAKE_BIN`
+to PATH before configuring. No tool or kernel is installed into an AVXEmu release.
+
+The QEMU source is official 11.1.2, SHA256
+`731b5681e4bb18be313231579b8efd0296c5b015fa36dc533874b639ba838016`.
+It **requires** `test/patch-lowcpu-qemu.sh`: pristine 11.1.2 swaps TZCNT's BMI1 gate and
+LZCNT's ABM gate. The helper accepts only the exact original decoder checksum, applies the
+two-predicate correction without fuzz, and verifies the result checksum. The CI build's
+package suffix identifies this correction. QEMU's source declares its Python build tools
+and pinned DTC subproject; the helper supplies compiler, Ninja, Python/venv/TOML, glib, pixman
+and zlib dependencies on either Ubuntu target. QEMU itself always builds with GCC,
+independently of the GCC/Clang runtime matrix. An unavailable download or failed build
+fails CI; distro QEMU is never substituted. QEMU 8.2 also fails invalid-LOCK controls.
+
+The boot kernel is Ubuntu's signed `linux-image-6.14.0-37-generic`, package version
+`6.14.0-37.37~24.04.1`, SHA256
+`9c17bb3f50741bf8f21b0f8a2afd088f5d0ae5b0d1cc00b7a866a63c8492d29a`.
+The same kernel boots each runner's constructed initramfs, with that runner's glibc and
+built test programs. This tests Ubuntu userspaces; it does not install/boot an Ubuntu VM
+image or depend on the runner's host kernel package being readable.
+
+To opt in locally after providing those tools:
+
+```sh
+export QEMU_SYSTEM_X86_64=/absolute/path/to/patched/qemu-system-x86_64
+export LOWCPU_KERNEL=/absolute/path/to/vmlinuz
+export LOWCPU_BUSYBOX=/absolute/path/to/static/busybox
+cmake -S . -B "$AVXEMU_BUILD_DIR" -DMavericksShipyard_DIR="$MavericksShipyard_DIR" -DAVXEMU_TEST_LOWCPU=ON
+cmake --build "$AVXEMU_BUILD_DIR" -j2
+ctest --test-dir "$AVXEMU_BUILD_DIR" --output-on-failure -L lowcpu
+```
+
+The runner uses full-system TCG because qemu-user lacks `process_vm_readv` support needed
+by safe operand reads. All fork/exec children stay in the guest. Sandy Bridge, LZCNT-only,
+and BMI1-only models check raw CPUID/XGETBV, unsupported AVX2 and invalid-LOCK SIGILL
+controls, advertised count semantics before preload, context restoration, ordinary/stripped
+images, all relocation/native/minspill settings, cold/warm caches and concurrent relocation.
+The 96 semantic launches and guest logs remain under the build directory's `lowcpu-logs/`.
+This is emulated AVX1 evidence. A real Claude Code task on physical AVX1 Linux hardware is
+separate application acceptance, not implied by these probes.
+
+Linux deliberately calls CTest directly: Shipyard's `run-repo-tests.sh PRESET` currently
+requires the macOS-only `shipyard-ctest` executable. The Shipyard install action provides
+`MavericksShipyard_DIR` and `SHIPYARD_SCRIPTS` on Linux. Each job runs the complete
+hermetic/replay label registry, raw-feature-guarded hardware registry and required lowcpu
+label, with family conventions and source-tree cleanliness checks. Shipyard retains
+platform-neutral conventions, Darwin preset execution, packaging, signing and publication.
+Publication requires Linux success as well as the existing macOS build and key scan.
 
 **How replay works.** `oracle`, `bmi_oracle`, `patchtest` and `bmimem` run each instruction on
 the real CPU and in the emulator side by side, in `record` mode, and write
@@ -68,7 +147,7 @@ faulting address.
 | `AVXEMU_DISABLE=1` | bypass the emulator entirely |
 | `AVXEMU_NO_REBIND=1` | when linked rather than inserted, skip rebinding `sigaction`/`signal` |
 | `AVXEMU_NOCACHE=1` | analyse at every launch: neither read nor write the load-time cache |
-| `AVXEMU_CACHE_DIR=<dir>` | keep the load-time cache there instead of `~/Library/Caches/avxemu` |
+| `AVXEMU_CACHE_DIR=<dir>` | override the platform cache directory with an absolute path (Darwin: `~/Library/Caches/avxemu`; Linux: absolute `$XDG_CACHE_HOME/avxemu`, otherwise `$HOME/.cache/avxemu`) |
 | `AVXEMU_CACHE_STATS=1` | report whether this launch hit, missed or refused the cache |
 | `AVXEMU_MINSPILL=0` | turn off the minimal-spill tier, a live-register thunk for a single register-operand BMI op (on by default) |
 | `AVXEMU_NATIVE=0` | turn off the generated native thunks, vector and scalar BMI, MULX included (on by default) |
@@ -87,7 +166,7 @@ On a CPU that already has AVX2, FMA, BMI1, BMI2, LZCNT, F16C and MOVBE, the load
 constructor returns at once, and avxemu stays inert. Anywhere else it arms four mechanisms.
 
 1. **Trampolines, the fast path.** Before the program runs, avxemu scans the main executable's
-   `__text`, guided by `LC_FUNCTION_STARTS`. It rewrites each run of faulting instructions into
+   code ranges, guided by normalized function bounds. It rewrites each run of faulting instructions into
    a 5-byte `jmp` to a generated thunk. The thunk saves the registers, emulates on a per-thread
    side stack, restores them and jumps back. About 97% of faulting sites never trap.
    Jump-table functions are mapped by recursive descent. (`src/tramp.c`, `src/tramp.S`,
@@ -115,7 +194,8 @@ applies the SSE equivalent to each half (`HALFOP` in `exec.c`).
 **Staying first in line.** Bun installs its own `SIGILL` reporter. avxemu interposes
 `sigaction`/`signal`, so a program's `SIGILL` handler becomes avxemu's chain target instead of
 replacing it. The real `sigaction` is found by parsing `libsystem_c.dylib`'s symbol table,
-because interposition breaks `dlsym`.
+because interposition breaks `dlsym` on Darwin. Linux resolves the next loader definition
+and uses ELF symbol interposition for preload and retained direct linkage.
 
 **Two ways to load it:**
 
@@ -225,6 +305,64 @@ holds mnemonic strings for diagnostics.
 
 **The rest:** `packaging/build-pkg.sh` builds the `.pkg` with shipyard, `contrib/` holds scripts
 for consumers (`extract-libavxemu.sh`), and `.github/workflows/` holds CI.
+
+## Platform architecture
+
+One emulator, instruction decoder, scanner, patcher, trampoline/relocation engine and cache
+serve Darwin and Linux. Runtime C is compiled with `-msse4.2 -mno-avx -mno-fma`; explicit
+assembly and hardware-oracle objects carry stronger instructions. `avxemu_emulate()` consumes
+the same register file from either signal context or trampoline path.
+
+`src/image.h` represents immutable, bounded code ranges, function spans, authoritative
+data exclusions and discovery policy. Platform image backends translate Mach-O/dyld or
+ELF/loader metadata into this model. `src/platform/context.h`, `memory.h`, `loader.h` and
+`host.h` expose saved register access, checked mapping/read/protection operations, signal
+installation/interposition, CPU/OS services and cache paths. Native signal frames, Mach
+services, ELF and Mach-O parsing stay in the backends; shared algorithms use these contracts.
+Vector context writes preserve unrelated xstate, x87 and MXCSR. Fault-time operations use
+bounded storage; Linux self-memory reads require `process_vm_readv` permission. A sandbox
+that forbids it cannot supply safe operand reads and is not a supported runtime environment.
+
+Load-time rewriting covers the main executable, not every loaded library. Linux supports
+glibc x86-64 dynamically linked PIE and non-PIE executables, including explicit-loader
+invocation when the mapped file can be identified safely. It associates a readable file
+with the actual loaded image before trusting build identity or metadata. Function bounds
+come from validated ELF symbols and supported `.eh_frame_hdr`/`.eh_frame` records. Missing,
+conflicting, malformed or ambiguous required-instruction coverage is refused; there is no
+byte-scan fallback that treats possible data as code. A stripped binary can work when its
+remaining unwind metadata proves the needed coverage. The parser is a bounded range reader,
+not a general DWARF unwinder. Unsupported metadata/CPU/OS cases can reject an application.
+
+The Linux interface is the shared library's source-build contract with the supported
+glibc loader and signal ABI. Internal C structs and cache files are not a stable public
+ABI; rebuild from source when changing toolchains/targets and allow incompatible caches to
+be discarded. No Linux distribution package, musl support, static injection, pre-AVX CPU
+support or cross-architecture emulation is promised.
+
+Required-instruction discovery uses one strategy selected by the image backend.
+Linux requires validated function bounds and direct recursive discovery; unresolved
+indirect flow is accepted only when every possible required encoding is already
+covered by a proven instruction prefix. Unknown candidate bytes fail startup.
+Before excluding skipped islands, strict discovery checks direct edges from every
+function, including candidate-free functions and other executable ranges. Proven
+external entries seed the destination's direct map until no new entries remain.
+Overlapping instructions, entries into declared data, or exhaustion of the bounded
+scan budget refuse the image before patching. Function extents alone do not
+establish that all entries have been discovered. Optional CPUID and
+eager trampoline passes use direct roots too; unrelated LEA/table guesses cannot
+authorize their writes, either during fresh analysis or cache replay.
+Darwin retains its established linear-first function scan, recursive fallback,
+and range mop-up for compatibility with existing Mavericks applications. This
+legacy strategy is heuristic: it does not prove that every selected instruction
+is reachable. Both strategies exclude verified data-in-code records and fully
+resolved direct-jump islands before fresh writes. Strict cache replay rediscovers
+and validates the complete prefix plan. Legacy cache replay retains the historical identity/integrity trust
+model: all recorded edits are validated locally before any write, but their global
+instruction boundaries and completeness are not re-proven against a maliciously
+reconstructed cache. Invalid records trigger fresh discovery. Cache identity
+includes the strategy and data layout.
+Mach-O data-in-code parsing stays in the Darwin backend; shared consumers use
+normalized bounded spans. No constant-state or interprocedural analysis is used.
 
 ## Releasing
 
