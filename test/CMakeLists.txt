@@ -24,6 +24,9 @@ endfunction()
 
 add_test(NAME run-wrapper COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/run-test.sh" "${CMAKE_CURRENT_SOURCE_DIR}/run.sh")
 
+avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
+add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
+
 avxemu_test_exe(inject SOURCES inject.c stubs.s LINK avxemu_core avxemu_asm)
 add_test(NAME inject COMMAND $<TARGET_FILE:inject>)
 
@@ -96,7 +99,7 @@ add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --becaus
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
-set_tests_properties(run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(memory-contract run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
                      linkhook-no-rebind inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page
