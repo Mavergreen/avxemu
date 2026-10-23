@@ -48,6 +48,12 @@ add_test(NAME cache-ranges COMMAND $<TARGET_FILE:cache-ranges>)
 avxemu_test_exe(memory-contract SOURCES memory_contract.c "${PROJECT_SOURCE_DIR}/src/platform/darwin/memory.c")
 add_test(NAME memory-contract COMMAND $<TARGET_FILE:memory-contract>)
 
+avxemu_test_exe(context-contract SOURCES context_contract.c context_contract.s LINK avxemu_core avxemu_asm)
+add_test(NAME context-contract COMMAND $<TARGET_FILE:context-contract>)
+avxemu_test_exe(loader-contract SOURCES loader_contract.c LINK avxemu_core avxemu_asm)
+add_test(NAME loader-contract COMMAND $<TARGET_FILE:loader-contract>)
+set_tests_properties(loader-contract PROPERTIES ENVIRONMENT "AVXEMU_ASSUME_CAPABLE=1" TIMEOUT 90)
+
 avxemu_test_exe(inject SOURCES inject.c stubs.s LINK avxemu_core avxemu_asm)
 add_test(NAME inject COMMAND $<TARGET_FILE:inject>)
 
@@ -120,7 +126,7 @@ add_test(NAME overread-fault COMMAND ${AVXEMU_RUN} --fails-when rosetta --becaus
 avxemu_test_exe(guard_page FLAGS -O0 SOURCES guard_page.c)
 add_test(NAME guard-page COMMAND sh "${CMAKE_CURRENT_SOURCE_DIR}/guard-page.sh" $<TARGET_FILE:guard_page> $<TARGET_FILE:avxemu>)
 
-set_tests_properties(image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
+set_tests_properties(context-contract loader-contract image-contract image-live image-live-linked memory-contract scan-contract cache-ranges run-wrapper inject memtest tramptest overread reloctest nativetest
                      minspilltest minspilltest-off cachetest zcnt16 selftest linkhook
                      linkhook-no-rebind inerttest inerttest-assume-capable threadtest
                      overread-fault guard-page

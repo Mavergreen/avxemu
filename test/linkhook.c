@@ -6,7 +6,7 @@
  * avxemu's sigaction()/signal() overrides are ignored, so a runtime that
  * installs its own SIGILL handler (Bun does, during startup) takes the signal
  * the emulator lives on and every emulated instruction turns into an "illegal
- * instruction" crash. handler.c answers that by rebinding the sigaction/signal
+ * instruction" crash. The Darwin loader answers that by rebinding the sigaction/signal
  * symbol pointers itself.
  *
  * Build this LINKED against the dylib — that is the whole point; running it
@@ -25,6 +25,7 @@
 #include <dlfcn.h>
 
 extern int avxemu_rebind_count;
+#include "platform/loader.h"
 
 static void my_handler(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)si; (void)uc;
@@ -50,8 +51,13 @@ int main(void) {
         return 1;
     }
 
-    /* Did our registration actually land, or did avxemu keep the handler and
-     * merely record ours as its chain target? */
+    /* The public query reports the application's disposition. Inspect genuine
+     * kernel ownership separately so this still detects a stolen front line. */
+    if (cur.sa_sigaction != my_handler) {
+        printf("FAIL linkhook: query did not report application handler\n");
+        return 1;
+    }
+    if (avxemu_real_sigaction(SIGILL, 0, &cur) != 0) return 1;
     int stolen = (cur.sa_sigaction == my_handler);
 
     if (expect_kept && stolen) {

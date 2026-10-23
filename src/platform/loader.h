@@ -1,0 +1,11 @@
+#ifndef AVXEMU_PLATFORM_LOADER_H
+#define AVXEMU_PLATFORM_LOADER_H
+#include <signal.h>
+/* Resolve genuine functions without activating interposition; safe to repeat. */
+int avxemu_loader_resolve(void);
+/* Resolve genuine functions and prepare interposition before owning signals. */
+int avxemu_loader_init(void);
+int avxemu_real_sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+int avxemu_sigaction(int sig, const struct sigaction *act, struct sigaction *old);
+void (*avxemu_signal(int sig, void (*handler)(int)))(int);
+#endif

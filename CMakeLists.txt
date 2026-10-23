@@ -33,6 +33,7 @@ avxemu_objects(avxemu_core
   src/exec.c src/exec_bmi.c src/softfma.c src/names.c src/decode.c
   src/lde.c src/emulate.c src/image.c src/platform/darwin/image.c
   src/platform/darwin/host.c src/platform/darwin/memory.c
+  src/platform/darwin/context.c src/platform/darwin/loader.c
   src/cpuid.c src/patch_mem.c src/tramp.c src/reloc.c src/handler.c
   src/lcache.c src/lcache.h)
 avxemu_objects(avxemu_asm src/selftest.s src/selftest.c src/tramp.s)
