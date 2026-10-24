@@ -1,4 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>Mavergreen/shipyard"]
+  "extends": [
+    "github>Mavergreen/shipyard"
+  ],
+  "packageRules": [
+    {
+      "description": "Ubuntu lanes are compatibility targets; change the matrix and provisioning together.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchFileNames": [
+        ".github/workflows/linux.yml"
+      ],
+      "matchDepNames": [
+        "ubuntu"
+      ],
+      "enabled": false
+    }
+  ]
 }

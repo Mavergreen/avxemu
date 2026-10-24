@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   ubuntu22:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -29,7 +29,7 @@ jobs:
           artifact-name: linux-ubuntu22.04-${{ matrix.compiler }}
 
   ubuntu24:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
