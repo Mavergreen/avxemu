@@ -48,9 +48,10 @@ ingredient pin files here requiring that caller; Shipyard owns SDK/Sparkle pins 
 
 - shipyard-cmake-only:test/prepare-linux-ci.sh: Ubuntu-only CI provisioning checks CMake's version before configuration and installs a verified fallback when needed; Shipyard provides no Linux shipyard-cmake executable. The helper rejects other hosts; macOS retains Shipyard's commands.
 - scheme: AVXEmu is its own upstream (no one else's release to repackage), so it versions itself by date as YYYYMMDD.N with no -mavericks.N axis
-- rosetta:.github/workflows/release.yml: the release job runs on an Apple Silicon (arm64) runner and primes Rosetta ("Ensure this runner can run x86_64 (Rosetta)") so ctest can execute the shipped x86_64 libavxemu.dylib, and the x86_64 test programs that load it (the hermetic and replay labels), before they ship. It cannot run natively: AVXEmu emulates x86 instructions, so the product under test is x86_64 by nature. The hardware label deliberately does not run translated: Rosetta is not ground truth for AVX2/FMA/BMI, and record mode refuses to run under it. Reconsider when these tests can move to an x86_64 host (the 10.9 box, an Intel runner, or the Mavericks VM runner the family is bringing to GitHub Actions); at the latest before macOS 28 removes Rosetta.
-- rosetta:test/CMakeLists.txt: the `overread-fault` and `cachetest` tests run translated in CI, on the arm64 runner, as declared known failures (`--fails-when rosetta`): under Rosetta avxemu's fault handler does not repair and retry the read that straddles an unmapped page, so overread-fault segfaults; and cachetest's three checks that compare code bytes between processes (replayed `__text` and pool against the analysed ones, a re-analysis after a corrupt file, 8 simultaneous cold starts) fail while its other checks pass. Neither cause is diagnosed yet. It cannot run natively there yet: CI has only arm64 runners, and the program under test is x86_64 by nature. Native 10.9 and Intel-with-AVX2 runs pass both; only the translated CI leg is marked, and run.sh fails a test that unexpectedly passes there. Reconsider when they can move to the Mavericks VM runner the family is bringing to GitHub Actions, or to the 10.9 box, at which point the mark comes off; at the latest before macOS 28 removes Rosetta.
-- on-target: no 10.9 acceptance job yet; exit: a release.yml job on Mavergreen/mavericks-vm@v1 that installs this run's pkg in the guest and runs what it ships, which publish needs
+
+- on-target:avx-only: KVM's CPUID mask does not force AVX2 instructions to fault. The Mavericks guest uses cpu-isa: avx2 and threadtest reports its expected skip. Real AVX-only faulting and Claude Code acceptance still require the physical Mavericks machine; Linux's required TCG matrix covers reduced-ISA Linux behavior.
+- on-target:claude-code: the guest does not fetch Claude Code; the claude-binary label remains an explicit physical-machine acceptance step below.
+- on-target:updater-ui: the installed updater must reach Cocoa startup with this run's version. Interactive Sparkle installation and its embedded relaunch helper are not driven by this runtime acceptance job; exit: a deterministic end-to-end updater acceptance fixture.
 
 ## Upstream release notes
 
@@ -69,7 +70,12 @@ A packaging-only re-release of the same source (a new `.N`):
 
 ### Before bumping `UPSTREAM_VERSION`
 
-CI cross-builds and runs the `hermetic` and `replay` tests under Rosetta, and requires GCC
+CI cross-builds on macos-26 and inspects the object instruction inventory there. Its
+`on-mavericks` job installs that run's package on 10.9.5, checks its manifest and dylib bytes,
+loads the installed dylib for its self-test and repo runtime tests, checks updater startup,
+and compares hardware oracles on an AVX2 guest. A CI-only bundle preserves the generated
+CTest registry and original paths, plus the same installed Shipyard tools; no compiler or
+CLT is required in the guest. Publication needs this job. CI also requires GCC
 and Clang Linux validation on Ubuntu 22.04/24.04, including hardware oracles where eligible
 and the patched-QEMU full-system AVX1 matrix. Hardware/application skips remain visible;
 the lowcpu label is mandatory and missing prerequisites fail. Two macOS checks need
@@ -81,8 +87,8 @@ were done.
     shipyard-cmake --preset native && shipyard-cmake --build --preset native
     CLAUDE_BIN=<a Claude Code binary> shipyard-ctest --preset native
 
-Everything passes or skips; this is the only place the tests run on 10.9's own dyld, on a CPU
-that needs the emulator.
+Everything passes or skips. Unlike the KVM guest, this physical AVX-only CPU really
+faults on unsupported instructions, exercising runtime relocation and Claude Code.
 
 **On an Intel Mac with AVX2, FMA and BMI:**
 

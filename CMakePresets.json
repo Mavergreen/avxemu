@@ -14,6 +14,10 @@
   ],
   "testPresets": [
     { "name": "native", "configurePreset": "native", "output": { "outputOnFailure": true } },
-    { "name": "cross", "configurePreset": "cross", "output": { "outputOnFailure": true } }
+    { "name": "cross", "configurePreset": "cross", "output": { "outputOnFailure": true } },
+    { "name": "mavericks-vm", "inherits": "cross",
+      "displayName": "cross-built runtime tests on Mavericks (inventory runs on the build host)",
+      "filter": { "exclude": { "name": "^(vex-leak-|claude-)" } },
+      "execution": { "noTestsAction": "error" } }
   ]
 }
