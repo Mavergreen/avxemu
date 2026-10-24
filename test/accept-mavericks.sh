@@ -16,7 +16,7 @@ sudo tar -xzf "$bundle/root.tar.gz" -C /
 sudo chown -R "$(id -u):$(id -g)" "$source" "$build"
 sudo chown "$(id -u):$(id -g)" "$TMPDIR"
 sudo mkdir -p /usr/local/mavergreen/bin
-sudo ln -sf ../shipyard/bin/ctest /usr/local/mavergreen/bin/shipyard-ctest
+sudo ln -sf ../shipyard/bin/shipyard-ctest /usr/local/mavergreen/bin/shipyard-ctest
 PATH=/usr/local/mavergreen/bin:$PATH
 SHIPYARD_SCRIPTS=/usr/local/mavergreen/shipyard/share/cmake/MavericksShipyard/scripts
 export PATH SHIPYARD_SCRIPTS

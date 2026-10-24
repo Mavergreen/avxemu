@@ -7,7 +7,9 @@ B=$(cd "${1:?build directory}" && pwd)
 OUT=${2:?output directory}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 SHIPYARD=/usr/local/mavergreen/shipyard
-[ -x "$SHIPYARD/bin/ctest" ]
+CMAKE=/usr/local/mavergreen/cmake
+[ -x "$SHIPYARD/bin/shipyard-ctest" ]
+[ -x "$CMAKE/bin/ctest" ]
 [ -f "$B/CTestTestfile.cmake" ]
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
@@ -20,8 +22,10 @@ git -C "$REPO" archive --output="$stage/source.tar" HEAD
 tar -xf "$stage/source.tar" -C "$stage/root$REPO"
 cp -R "$B/." "$stage/root$B/"
 rm -rf "$stage/root$B/dist" "$stage/root$B/Testing"
-# platform: install@v1 provides universal, Mavericks-compatible CTest and its dependencies.
+# platform: install@v1 installs Shipyard launchers and the separate universal cmake product;
+#           transporting only Shipyard leaves the launchers with no CTest executable.
 cp -R "$SHIPYARD" "$stage/root/usr/local/mavergreen/"
+cp -R "$CMAKE" "$stage/root/usr/local/mavergreen/"
 printf '%s\n' "$REPO" > "$OUT/source-path"
 printf '%s\n' "$B" > "$OUT/build-path"
 printf '%s\n' "${TMPDIR:-/tmp}" > "$OUT/tmp-path"
