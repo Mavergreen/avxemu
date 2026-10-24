@@ -7,7 +7,7 @@ It was originally developed by @Wowfunhappy to coax Claude Code for darwin-x64 t
 
 ## Using the emulator
 
-On macOS, run an unmodified program with the emulator:
+To run an unmodified program with the emulator:
 
 ```sh
 DYLD_INSERT_LIBRARIES=/usr/local/mavergreen/avxemu/lib/libavxemu.dylib <program>
@@ -17,29 +17,4 @@ To link a program with it directly, pass `-rpath /usr/local/mavergreen/avxemu/li
 
 To modify an existing Mach-O binary's linkage, see [Drydock](https://github.com/Mavergreen/drydock).
 
-On x86-64 glibc Linux, build and install `libavxemu.so` from source (see
-[DEVELOPING.md](DEVELOPING.md)), then preload it into a dynamically linked executable:
-
-```sh
-LD_PRELOAD=/absolute/install/prefix/lib/libavxemu.so <program>
-```
-
-For direct dynamic linkage, retain the library even when the program references no exported
-symbols: `cc program.c -L/absolute/install/prefix/lib -Wl,--no-as-needed -lavxemu
--Wl,--as-needed -Wl,-rpath,/absolute/install/prefix/lib -o program`. With the common
-`--as-needed` default, `-lavxemu` alone can be discarded and its constructor never runs.
-Preload variables also reach child processes; privileged/secure execution may ignore them.
-
-Both platforms require SSE4.2, AVX1, and OS support for AVX register state. Linux validation
-targets Ubuntu 22.04 and 24.04 glibc userspaces. Linux rewrites the main executable only and
-requires enough trustworthy ELF function metadata to prove required LZCNT/TZCNT patches;
-ambiguous or missing coverage fails startup. Stripping can remove that metadata, though
-validated unwind records can still supply bounds. See [platform architecture and
-limitations](DEVELOPING.md#platform-architecture).
-
-Linux caches use `$XDG_CACHE_HOME/avxemu` when `XDG_CACHE_HOME` is absolute, otherwise
-`$HOME/.cache/avxemu`. Set `AVXEMU_CACHE_DIR` to an absolute directory to override this;
-`AVXEMU_NOCACHE=1` disables caching. Darwin retains `~/Library/Caches/avxemu`.
-The Linux deliverable is a source-built shared library; releases continue to publish the
-macOS package. Musl, static executable injection, other architectures and pre-AVX CPUs are
-outside the supported scope.
+An experimental Linux port exists but has not yet been tested with real programs on real hardware.
