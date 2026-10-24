@@ -80,21 +80,14 @@ jobs:
           { echo "ver=$ver"; echo "publish=$pub"; } >> "$GITHUB_OUTPUT"
           echo "version=$ver publish=$pub"
 
-      - name: Ensure this runner can run x86_64 (Rosetta)
-        run: |
-          set -eu
-          arch -x86_64 /usr/bin/true 2>/dev/null \
-            || sudo softwareupdate --install-rosetta --agree-to-license
-          arch -x86_64 /usr/bin/true
-
       - name: Configure (cross, pinned 10.9 SDK, with the updater)
         run: shipyard-cmake --preset cross -DAVXEMU_BUILD_UPDATER=ON
 
       - name: Build + compat guard
         run: shipyard-cmake --build --preset cross
 
-      - name: Run the repo's tests
-        run: sh "$SHIPYARD_SCRIPTS/run-repo-tests.sh" cross
+      - name: Inspect the cross-built instruction inventory
+        run: shipyard-ctest --preset cross -R '^vex-leak-' --no-tests=error
 
       - name: Locate the build
         run: echo "BUILD=${TMPDIR:-/tmp}/mm-build/$(basename "$PWD")-cross" >> "$GITHUB_ENV"
@@ -102,7 +95,7 @@ jobs:
       - name: Package the .pkg
         run: sh packaging/build-pkg.sh "$BUILD" "${{ steps.ver.outputs.ver }}" "$BUILD/dist/avxemu-${{ steps.ver.outputs.ver }}.pkg"
 
-      - name: The package yields exactly the tested dylib
+      - name: The package yields exactly the built dylib
         run: sh test/extract-test.sh "$BUILD/dist/avxemu-${{ steps.ver.outputs.ver }}.pkg" "$BUILD/libavxemu.dylib"
 
       - name: Release notes
@@ -157,6 +150,44 @@ jobs:
           name: avxemu
           path: ${{ env.BUILD }}/dist/*
 
+      - name: Bundle the cross-built test registry and Shipyard for Mavericks
+        run: sh test/bundle-mavericks.sh "$BUILD" "$RUNNER_TEMP/mavericks-tests"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mavericks-tests
+          path: ${{ runner.temp }}/mavericks-tests/*
+
+  on-mavericks:
+    needs: [build]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: avxemu
+          path: dist
+      - uses: actions/download-artifact@v8
+        with:
+          name: mavericks-tests
+          path: mavericks-tests
+      # platform: KVM masks CPUID but does not trap AVX2 on capable hardware. Use the real
+      #           AVX2 capability for oracles; Linux TCG and the physical AVX-only Mac cover #UD.
+      - uses: Mavergreen/mavericks-vm@v1
+        with:
+          image-key: ${{ secrets.MAVERICKS_VM_KEY }}
+          cpu-isa: avx2
+          copyback: false
+          debug-on-error: true
+          run: |
+            sh test/accept-mavericks.sh mavericks-tests \
+              "$PWD/dist/avxemu-${{ needs.build.outputs.ver }}.pkg" "${{ needs.build.outputs.ver }}"
+
   scan:
     needs: [build]
     if: always() && (needs.build.outputs.publish == 'yes')
@@ -170,8 +201,8 @@ jobs:
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
 
   publish:
-    needs: [build, scan, linux]
-    if: needs.build.outputs.publish == 'yes' && needs.build.result == 'success' && needs.scan.result == 'success' && needs.linux.result == 'success'
+    needs: [build, scan, linux, on-mavericks]
+    if: needs.build.outputs.publish == 'yes' && needs.build.result == 'success' && needs.scan.result == 'success' && needs.linux.result == 'success' && needs.on-mavericks.result == 'success'
     permissions:
       contents: write
     uses: Mavergreen/shipyard/.github/workflows/publish-release.yml@v1

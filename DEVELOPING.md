@@ -40,7 +40,7 @@ Each test carries a label for what it needs. A test whose need is unmet skips.
 
 | label | needs | runs on |
 |---|---|---|
-| `hermetic` | only the emulator, supported x86-64 CPU/OS | Darwin and Linux; macOS CI uses Rosetta |
+| `hermetic` | only the emulator, supported x86-64 CPU/OS | Darwin and Linux; macOS runtime CI uses a 10.9.5 VM |
 | `replay` | only the emulator, checked against recordings from AVX2 silicon | everywhere, CI included |
 | `hardware` | raw features required by each oracle, not Rosetta | capable x86-64 Darwin or Linux hosts |
 | `claude-binary` | `CLAUDE_BIN=<a Claude Code binary>` | wherever you set it |
@@ -115,16 +115,22 @@ the instructions.
 
 **Re-recording a reference:** see INGREDIENTS.md, "Releasing".
 
-## Known failures
+## Mavericks CI
 
-- `overread-fault` is marked `--fails-when rosetta`. Under Rosetta the fault handler does not
-  repair the straddling read. Cause not yet diagnosed.
-- `cachetest` is marked `--fails-when rosetta`. Under Rosetta, the three checks that compare
-  code bytes between processes fail: the replayed `__text` and pool match the analysed ones, a
-  re-analysis after a corrupt file reaches the same result, and 8 simultaneous cold starts
-  agree. Its other checks pass there. Cause not yet diagnosed.
+The release workflow cross-builds on macos-26 and runs the `vex-leak-*` object checks there.
+It bundles the generated CTest registry, binaries, committed source, and installed universal
+Shipyard tools for a real 10.9.5 guest. Restoring their original absolute paths preserves
+CTest commands and test data without maintaining a second test list. The guest installs
+this run's package, verifies its version and dylib bytes, then replaces the build dylib
+with a symlink to the installed one so both linked and inserted tests use the package.
+The `mavericks-vm` test preset excludes only the host-side inventory checks and the
+optional Claude binary tests. Hardware oracles must run; only `threadtest` may skip.
 
-A marked test that starts passing fails with `UNEXPECTED PASS`. Remove its mark.
+The guest uses `cpu-isa: avx2`: KVM can mask CPUID but cannot make AVX2 instructions fault
+on an AVX2 host. Physical Mavericks AVX-only tests remain necessary for Claude Code and
+runtime relocation. Linux CI uses full-system TCG to test genuinely missing instructions.
+Rosetta is no longer an acceptance target; the former expected-failure marks on
+`cachetest` and `overread-fault` have been removed. Neither is waived on Mavericks.
 
 ## Debugging
 
