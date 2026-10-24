@@ -4,12 +4,13 @@
 #include <stdint.h>
 #include <stddef.h>
 #include "decode.h"
+#include "image.h"
 
 /*
  * A flat snapshot of the machine state the emulator needs. Both entry points
  * fill one and hand it to avxemu_emulate():
  *   - the SIGILL handler copies it out of the signal's AVX mcontext;
- *   - the trampoline saver (tramp.s) spills the live registers into it.
+ *   - the trampoline saver (tramp.S) spills the live registers into it.
  * ymm is contiguous 32-byte (low xmm + high half), gpr is x86 register order
  * (0=rax,1=rcx,2=rdx,3=rbx,4=rsp,5=rbp,6=rsi,7=rdi,8..15=r8..r15).
  */
@@ -38,11 +39,19 @@ int avxemu_relocate_block(uint8_t *site);  /* returns 1 if relocated */
  * Returns NULL if the pool is uninitialized or exhausted. */
 void *avxemu_pool_alloc(size_t n);
 
+/* Startup-only span writes: split at mappings, then restore all permissions.
+ * The runtime atomic publisher uses bounded memory_patch_begin/end directly. */
+avxemu_mapping *avxemu_patch_write_begin(uintptr_t address, size_t size, size_t *count);
+void avxemu_patch_write_end(avxemu_mapping *saved, size_t count);
+
+long avxemu_patch_zcnt_image(const avxemu_image *image, unsigned required);
+
 /* Window patch-safety (Part 3): is it safe to write a `jmp` of `jmplen` bytes at
- * `site`? Finds the function containing `site` (cached LC_FUNCTION_STARTS bounds)
+ * `site`? Finds the function containing `site` (explicit image function bounds)
  * and returns 0 if any branch target lands in the open interval (site, site+jmplen)
  * OR the containing function can't be determined/decoded (conservative decline).
  * Returns 1 only if provably safe. */
 int avxemu_patch_safe(uint8_t *site, int jmplen);
+const uint8_t *avxemu_patch_limit(const uint8_t *site);
 
 #endif /* AVXEMU_REGFILE_H */

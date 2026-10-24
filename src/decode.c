@@ -283,7 +283,8 @@ static int decode_inner(const uint8_t *p, decoded *d) {
                    if(pp==0){d->op=BMI_BZHI; d->a_src=b_rm; d->b_src=vvvv;}        /* val=rm,idx=vvvv */
                    else if(pp==3){d->op=BMI_PDEP; d->a_src=vvvv; d->b_src=b_rm;}   /* F2: src=vvvv,mask=rm */
                    else if(pp==2){d->op=BMI_PEXT; d->a_src=vvvv; d->b_src=b_rm;}   /* F3 */
-                   if(d->op)handled=1; break;
+                   if(d->op)handled=1;
+                   break;
         case 0xF6: if(pp==3){ d->op=BMI_MULX;          /* F2: lo->vvvv, hi->reg, src1 = implicit rdx */
                        d->dst=vvvv; d->bmi_dst2=reg; d->dst_kind=DST_GPR; d->bmi_s1_rdx=1; d->b_src=b_rm; handled=1; } break;
         case 0xF7: d->dst=reg; d->dst_kind=DST_GPR;
@@ -291,7 +292,8 @@ static int decode_inner(const uint8_t *p, decoded *d) {
                    else if(pp==1){d->op=BMI_SHLX; d->a_src=b_rm; d->b_src=vvvv;}   /* 66 */
                    else if(pp==2){d->op=BMI_SARX; d->a_src=b_rm; d->b_src=vvvv;}   /* F3 */
                    else if(pp==3){d->op=BMI_SHRX; d->a_src=b_rm; d->b_src=vvvv;}   /* F2 */
-                   if(d->op)handled=1; break;
+                   if(d->op)handled=1;
+                   break;
         default: d->is_bmi=0; break;
         }
         if(!handled) d->is_bmi=0;

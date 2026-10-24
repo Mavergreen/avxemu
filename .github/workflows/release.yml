@@ -25,6 +25,9 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  linux:
+    uses: ./.github/workflows/linux.yml
+
   build:
     runs-on: macos-26
     timeout-minutes: 45
@@ -167,8 +170,8 @@ jobs:
       SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
 
   publish:
-    needs: [build, scan]
-    if: needs.build.outputs.publish == 'yes'
+    needs: [build, scan, linux]
+    if: needs.build.outputs.publish == 'yes' && needs.build.result == 'success' && needs.scan.result == 'success' && needs.linux.result == 'success'
     permissions:
       contents: write
     uses: Mavergreen/shipyard/.github/workflows/publish-release.yml@v1

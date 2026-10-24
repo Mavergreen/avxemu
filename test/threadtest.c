@@ -6,7 +6,7 @@
  * threads run the same hot loops in lockstep, so each loop's relocation lands
  * while the others are executing it, faulting on it, or sitting just past it.
  *
- * The loop body (threadtest.s) is copied NFUNCS times into an r-x buffer
+ * The loop body (threadtest.S) is copied NFUNCS times into an r-x buffer
  * near the pool and registered as the patch-safety layout, the same way
  * reloctest does it. Each trial is a fresh fork, so each one relocates every
  * site again from scratch. A trial fails if a thread computes the wrong answer
@@ -28,7 +28,9 @@
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#ifdef __APPLE__
 #include <mach-o/dyld.h>
+#endif
 #include "cpu.h"
 
 extern const uint8_t tt_body_start[], tt_body_site[], tt_body_end[];
@@ -116,8 +118,15 @@ static void probe_site(void) {
  * what it runs. Asked by running it once in a child with avxemu disabled, where a #UD can
  * only kill it. */
 static int site_faults(void) {
-    char self[1024]; uint32_t sz = sizeof self;
+    char self[1024];
+#ifdef __APPLE__
+    uint32_t sz = sizeof self;
     if (_NSGetExecutablePath(self, &sz)) return -1;
+#else
+    ssize_t len = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (len < 0 || (size_t)len >= sizeof self - 1) return -1;
+    self[len] = 0;
+#endif
     fflush(0);
     pid_t p = fork();
     if (p == 0) {

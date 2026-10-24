@@ -29,17 +29,16 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <mach/mach.h>
-#include <cpuid.h>
+#include "platform/memory.h"
+#include "avxemu_cpuid.h"
+#include <unistd.h>
 
-extern int avxemu_get_cpuid(uint32_t leaf, uint32_t sub, uint32_t r[4]);   /* handler.c */
-
-/* Must match tramp.c / tramp.s exactly (the run_record is appended after the
+/* Must match tramp.c / tramp.S exactly (the run_record is appended after the
  * tt thunk code; the dispatcher walks insns[i].dec / .addr). */
 typedef struct { uint64_t addr; decoded dec; } tramp_insn;
 typedef struct { uint32_t n; uint32_t pad; tramp_insn insns[]; } run_record;
 
-/* tt thunk template (tramp.s): full spill (all ymm) -> call dispatch -> reload
+/* tt thunk template (tramp.S): full spill (all ymm) -> call dispatch -> reload
  * -> jmp resume. Position-independent; the builder memcpy's [tt_start,tt_record),
  * sets the two pointer slots, and appends the run_record. */
 extern char avxemu_tt_start[], avxemu_tt_record[];
@@ -247,7 +246,8 @@ static void alu0f_rr(uint8_t **p, int w, uint8_t opc, int reg, int rm){
 static void emit_push(uint8_t **p, int r){ if(r>=8) eb(p,0x41); eb(p,(uint8_t)(0x50|(r&7))); }
 static void emit_pop (uint8_t **p, int r){ if(r>=8) eb(p,0x41); eb(p,(uint8_t)(0x58|(r&7))); }
 static void emit_mov_imm32(uint8_t **p, int r, uint32_t imm){ /* mov r32,imm32 (zero-extends to r64) */
-    if (r>=8) eb(p,0x41); eb(p,(uint8_t)(0xB8|(r&7))); e32(p,imm);
+    if (r>=8) eb(p,0x41);
+    eb(p,(uint8_t)(0xB8|(r&7))); e32(p,imm);
 }
 static void emit_mov_rr (uint8_t **p,int w,int d,int s){ alu_rr(p,w,0x89,s,d); } /* d = s   (MOV r/m,r) */
 static void emit_and_rr (uint8_t **p,int w,int d,int s){ alu_rr(p,w,0x21,s,d); } /* d &= s  (AND r/m,r) */
@@ -430,11 +430,8 @@ static int patch_site_jmp(uint8_t *site, int64_t srel, volatile uint8_t *patched
     if (!in_i32(srel)) return 0;
     uint8_t *w = jmp_word(site);
     if (!w) return 0;
-    mach_port_t task = mach_task_self();
-    uintptr_t lo = (uintptr_t)w & ~(uintptr_t)0xfff;   /* one line => one page */
-    if (vm_protect(task, (vm_address_t)lo, 0x1000, FALSE,
-                   VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE | VM_PROT_COPY) != KERN_SUCCESS)
-        return 0;
+    avxemu_mapping saved;
+    if (!avxemu_memory_patch_begin((uintptr_t)w, 8, &saved)) return 0;
     uint8_t b[8];
     memcpy(b, w, 8);
     size_t k = (size_t)(site - w);
@@ -442,7 +439,10 @@ static int patch_site_jmp(uint8_t *site, int64_t srel, volatile uint8_t *patched
     uint64_t v; memcpy(&v, b, 8);
     *patched = 1;
     __asm__ volatile("xchgq %0, (%1)" : "+r"(v) : "r"(w) : "memory");   /* the one store */
-    vm_protect(task, (vm_address_t)lo, 0x1000, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    if (!avxemu_memory_patch_end(&saved)) {
+        static const char msg[] = "avxemu: fatal: cannot restore relocation page permissions\n";
+        (void)!write(2, msg, sizeof msg - 1); _exit(127);
+    }
     return 1;
 }
 
@@ -464,11 +464,18 @@ int avxemu_reloc_last_reason;   /* diagnostic: why the last relocate declined (A
  * following instructions until >=5 bytes, each safely copyable
  * (position-independent). Returns the faulting op's length, or 0 (reason set). */
 static int reloc_window(uint8_t *site, decoded *fd, uint8_t **endp) {
-    int fl = decode(site, fd);
+    const uint8_t *lim = avxemu_patch_limit(site);
+    if (!lim || (size_t)(lim - site) < 5) RELOC_DECLINE(5);
+    if ((size_t)(lim - site) > WINDOW_LIM) lim = site + WINDOW_LIM;
+    int zk0, prefix;
+    int length = x86_len(site, lim, &zk0, &prefix);
+    if (length <= 0) RELOC_DECLINE(2);
+    uint8_t bytes[16] = {0};
+    memcpy(bytes, site, (size_t)length);
+    int fl = decode(bytes, fd);
     if (fl <= 0 || fd->op == 0) RELOC_DECLINE(2);
     if (!block_faults(fd)) RELOC_DECLINE(3);
 
-    const uint8_t *lim = site + WINDOW_LIM;
     uint8_t *end = site + fl;
     while ((size_t)(end - site) < 5) {
         int zk, off;
@@ -481,6 +488,7 @@ static int reloc_window(uint8_t *site, decoded *fd, uint8_t **endp) {
     /* the 5-byte jmp we write at the site must stay within the relocated window
      * (bytes [site+1,site+5) inside the gathered instruction boundaries) */
     if ((size_t)(end - site) < 5) RELOC_DECLINE(4);
+    if (end > lim) RELOC_DECLINE(4);
     *endp = end;
     return fl;
 }

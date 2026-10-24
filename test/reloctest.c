@@ -37,58 +37,6 @@ typedef struct { uint64_t gpr[16]; uint64_t rflags; } State;
  * `out`. rsp (gpr[4]) is the harness's own and is neither loaded nor captured. */
 extern void reloc_test_invoke(void *code, const State *in, State *out);
 
-__asm__(
-"   .data\n"
-"   .p2align 3\n"
-"_rh_code: .quad 0\n"
-"_rh_out:  .quad 0\n"
-"_rh_rax:  .quad 0\n"
-"   .text\n"
-"   .p2align 4\n"
-"   .globl _reloc_test_invoke\n"
-"_reloc_test_invoke:\n"                 /* rdi=code, rsi=in, rdx=out */
-"   pushq %rbx\n   pushq %rbp\n   pushq %r12\n   pushq %r13\n   pushq %r14\n   pushq %r15\n"
-"   movq %rdi, _rh_code(%rip)\n"
-"   movq %rdx, _rh_out(%rip)\n"
-"   pushq 128(%rsi)\n   popfq\n"        /* rflags */
-"   movq 0*8(%rsi), %rax\n"
-"   movq 1*8(%rsi), %rcx\n"
-"   movq 2*8(%rsi), %rdx\n"
-"   movq 3*8(%rsi), %rbx\n"
-"   movq 5*8(%rsi), %rbp\n"
-"   movq 7*8(%rsi), %rdi\n"
-"   movq 8*8(%rsi), %r8\n"
-"   movq 9*8(%rsi), %r9\n"
-"   movq 10*8(%rsi), %r10\n"
-"   movq 11*8(%rsi), %r11\n"
-"   movq 12*8(%rsi), %r12\n"
-"   movq 13*8(%rsi), %r13\n"
-"   movq 14*8(%rsi), %r14\n"
-"   movq 15*8(%rsi), %r15\n"
-"   movq 6*8(%rsi), %rsi\n"             /* rsi last */
-"   callq *_rh_code(%rip)\n"            /* run the buffer (ends in ret) */
-"   movq %rax, _rh_rax(%rip)\n"         /* stash rax (mov: no flag effect) */
-"   movq _rh_out(%rip), %rax\n"
-"   movq %rcx, 1*8(%rax)\n"
-"   movq %rdx, 2*8(%rax)\n"
-"   movq %rbx, 3*8(%rax)\n"
-"   movq %rbp, 5*8(%rax)\n"
-"   movq %rsi, 6*8(%rax)\n"
-"   movq %rdi, 7*8(%rax)\n"
-"   movq %r8,  8*8(%rax)\n"
-"   movq %r9,  9*8(%rax)\n"
-"   movq %r10, 10*8(%rax)\n"
-"   movq %r11, 11*8(%rax)\n"
-"   movq %r12, 12*8(%rax)\n"
-"   movq %r13, 13*8(%rax)\n"
-"   movq %r14, 14*8(%rax)\n"
-"   movq %r15, 15*8(%rax)\n"
-"   pushfq\n   popq %rcx\n   movq %rcx, 128(%rax)\n"   /* flags (still the buffer's) */
-"   movq _rh_rax(%rip), %rcx\n   movq %rcx, 0*8(%rax)\n"
-"   popq %r15\n   popq %r14\n   popq %r13\n   popq %r12\n   popq %rbp\n   popq %rbx\n"
-"   ret\n"
-);
-
 #define ARITH_FLAGS 0x8D5ull   /* CF|PF|AF|ZF|SF|OF */
 #define F_AF 0x10ull
 

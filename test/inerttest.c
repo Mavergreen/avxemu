@@ -24,8 +24,18 @@
 #include "cpu.h"
 
 /* A cpuid in our own __text, where avxemu's cpuid pass would rewrite it. */
+#ifdef __APPLE__
 __asm__(".text\n.globl _probe_cpuid\n_probe_cpuid:\n cpuid\n ret\n");
+#else
+__asm__(".text\n.globl probe_cpuid\n.type probe_cpuid,@function\nprobe_cpuid:\n cpuid\n ret\n.size probe_cpuid,.-probe_cpuid\n");
+#endif
 extern const uint8_t probe_cpuid[];
+#ifdef __APPLE__
+extern int avxemu_rebind_count;
+#else
+static const int avxemu_rebind_count;
+#endif
+#include "platform/loader.h"
 
 int main(void) {
     int assume = getenv("AVXEMU_ASSUME_CAPABLE") != 0;
@@ -33,13 +43,13 @@ int main(void) {
      * can report AVX2 without, say, MOVBE, and there avxemu installs. */
     int real = cpu_avxemu_capable();
     struct sigaction cur;
-    sigaction(SIGILL, 0, &cur);
+    avxemu_real_sigaction(SIGILL, 0, &cur);
     int handler_ours = cur.sa_handler != SIG_DFL;
     int text_patched = !(probe_cpuid[0] == 0x0F && probe_cpuid[1] == 0xA2);
 
     const char *mode = assume ? "AVXEMU_ASSUME_CAPABLE=1" : real ? "capable CPU" : "lacking CPU";
     int want = !(assume || real);   /* installed exactly when the CPU needs us */
-    if (handler_ours == want && text_patched == want) {
+    if (handler_ours == want && text_patched == want && (want || avxemu_rebind_count==0)) {
         printf("PASS inerttest (%s): SIGILL %s, __text %s\n", mode,
                want ? "taken" : "untouched", want ? "patched" : "untouched");
         return 0;

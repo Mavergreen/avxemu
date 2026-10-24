@@ -1,0 +1,70 @@
+name: Validate Linux runtime
+description: Build and validate the complete Linux runtime with required AVX1 TCG execution
+inputs:
+  artifact-name:
+    description: Unique evidence artifact name for this Ubuntu/compiler job
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Select the external build directory
+      shell: bash
+      run: echo "BUILD=$RUNNER_TEMP/avxemu-linux" >> "$GITHUB_ENV"
+
+    - name: Install mavericks-shipyard
+      uses: Mavergreen/shipyard/.github/actions/install@v1
+
+    - name: Record the pre-build tree
+      shell: bash
+      run: sh "$SHIPYARD_SCRIPTS/assert-tree-clean.sh" --record
+
+    - name: Provision and verify Linux test tools
+      shell: bash
+      run: sh test/prepare-linux-ci.sh "$RUNNER_TEMP/linux-tools" "$GITHUB_ENV"
+
+    - name: Select CMake
+      shell: bash
+      run: echo "$CMAKE_BIN" >> "$GITHUB_PATH"
+
+    - name: Check family conventions
+      shell: bash
+      run: sh "$SHIPYARD_SCRIPTS/check-family-conventions.sh"
+
+    # platform: Shipyard's preset test runner requires macOS-only shipyard-ctest.
+    # spec: DEVELOPING.md "Linux CI dependencies" defines direct CTest on Ubuntu.
+    - name: Configure the complete runtime and required reduced-CPU test
+      shell: bash
+      run: cmake -S . -B "$BUILD" -DMavericksShipyard_DIR="$MavericksShipyard_DIR" -DAVXEMU_TEST_LOWCPU=ON
+
+    - name: Build
+      shell: bash
+      run: cmake --build "$BUILD" -j2
+
+    - name: Hermetic and replay registry
+      shell: bash
+      run: ctest --test-dir "$BUILD" --no-tests=error --output-on-failure -L 'hermetic|replay'
+
+    - name: Hardware oracles (raw feature guards report skips)
+      shell: bash
+      run: |
+        "$BUILD/test/cpuprobe"
+        ctest --test-dir "$BUILD" --no-tests=error --output-on-failure -L hardware
+
+    - name: Required full-system AVX1 matrix
+      shell: bash
+      run: ctest --test-dir "$BUILD" --no-tests=error --output-on-failure -L lowcpu
+
+    - name: The build must not have written into the source tree
+      if: always()
+      shell: bash
+      run: sh "$SHIPYARD_SCRIPTS/assert-tree-clean.sh"
+
+    - name: Preserve test evidence
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ env.BUILD }}/Testing/Temporary/
+          ${{ env.BUILD }}/lowcpu-logs/
+        if-no-files-found: warn

@@ -1,4 +1,5 @@
 #include "cpu.h"
+#include "asm.h"
 #include <cpuid.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -9,15 +10,15 @@
 #endif
 
 /*
- * The functions that execute cpuid live outside __text, in the section the test stubs use. A
- * test program that links the emulator's core gets avxemu's load-time cpuid pass, which turns
+ * The functions that execute cpuid live outside __text, in the raw section the self-test
+ * stubs use. A test program that links the emulator's core gets avxemu's load-time cpuid pass, which turns
  * every cpuid in __text into a trap answered with the features avxemu advertises; a record-mode
  * feature check asked that way would find BMI on a CPU without it, and record the emulator
  * against itself. The pass never scans this section, so these ask the CPU itself.
  */
-#define RAW_CPUID __attribute__((section("__TEXT,__avxemu_test,regular,pure_instructions")))
+#define RAW_CPUID AVXEMU_RAW_ATTR
 
-static uint64_t xgetbv0(void) {
+RAW_CPUID static uint64_t xgetbv0(void) {
     uint32_t lo, hi;
     __asm__ volatile(".byte 0x0f,0x01,0xd0" : "=a"(lo), "=d"(hi) : "c"(0));
     return ((uint64_t)hi << 32) | lo;
